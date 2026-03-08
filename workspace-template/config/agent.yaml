@@ -1,0 +1,9 @@
+# Agent-level configuration
+# This file is read by the agent runtime on startup.
+
+agent:
+  name: "Andy"
+  default_model: opus
+
+memory:
+  db_path: memory/knowledge.db

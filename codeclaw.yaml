@@ -1,0 +1,10 @@
+kernel:
+  port: 19000
+  log_level: info
+
+agent:
+  id: andy
+  image: codeclaw/agent-runtime:latest
+  workspace_volume: agent-andy-workspace
+  api_key_env: ANTHROPIC_API_KEY
+  default_model: opus

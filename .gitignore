@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.js.map
+*.d.ts.map
+.env
+.env.*
+!.env.example
+
+# Reference repos (too large for version control)
+nanoclaw/
+openclaw/

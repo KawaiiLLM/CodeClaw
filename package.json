@@ -1,0 +1,21 @@
+{
+  "name": "codeclaw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A Unix microkernel-style personal AI Agent system powered by Claude Agent SDK",
+  "scripts": {
+    "dev:kernel": "tsx packages/kernel/src/index.ts",
+    "dev:agent": "tsx packages/agent-runtime/src/index.ts",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.15",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
