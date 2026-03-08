@@ -163,10 +163,21 @@ class HttpError extends Error {
   }
 }
 
+const MAX_BODY_BYTES = 1_048_576; // 1MB
+
 function parseJsonBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    let totalSize = 0;
+    req.on("data", (chunk: Buffer) => {
+      totalSize += chunk.length;
+      if (totalSize > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new HttpError(413, "Payload too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => {
       try {
         const raw = Buffer.concat(chunks).toString("utf-8");

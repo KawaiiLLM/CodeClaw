@@ -5,6 +5,7 @@
 export interface SkillServiceRegistration {
   skillId: string;
   type: "channel" | "tool";
+  channel?: string; // For channel-type skills: the channel name (defaults to skillId)
   capabilities: string[]; // ["send_message", "receive_message"]
   endpoint: string; // "http://localhost:7001"
 }

@@ -20,7 +20,28 @@ export class ContainerManager {
   private containers = new Map<string, string>(); // agentId -> containerId
 
   constructor() {
-    this.docker = new Docker();
+    // Support Colima and other non-default Docker socket paths
+    const socketPath = process.env.DOCKER_HOST?.replace("unix://", "")
+      ?? this.findDockerSocket();
+    this.docker = socketPath ? new Docker({ socketPath }) : new Docker();
+  }
+
+  private findDockerSocket(): string | undefined {
+    const candidates = [
+      "/var/run/docker.sock",
+      `${process.env.HOME}/.colima/default/docker.sock`,
+      `${process.env.HOME}/.colima/docker.sock`,
+    ];
+    for (const sock of candidates) {
+      try {
+        const fs = require("node:fs");
+        fs.accessSync(sock);
+        return sock;
+      } catch {
+        continue;
+      }
+    }
+    return undefined;
   }
 
   /** Create and register an agent container (does not start it). */

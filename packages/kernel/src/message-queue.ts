@@ -10,7 +10,7 @@ const DEFAULT_PRIORITY = 10;
 
 export class MessageQueue {
   private queue: QueueEntry[] = [];
-  private seenIds = new Set<string>();
+  private seenIds = new Map<string, number>(); // dedupeKey -> timestamp
 
   /**
    * Enqueue a message. Deduplicates by message ID.
@@ -21,7 +21,7 @@ export class MessageQueue {
     if (this.seenIds.has(dedupeKey)) {
       return false;
     }
-    this.seenIds.add(dedupeKey);
+    this.seenIds.set(dedupeKey, Date.now());
 
     const entry: QueueEntry = {
       message: msg,
@@ -72,12 +72,13 @@ export class MessageQueue {
     return Object.keys(this.pendingByChannel());
   }
 
-  /** Clear dedup cache for messages older than the given age (ms). */
+  /** Clear dedup entries older than maxAge. */
   pruneDedup(maxAge: number = 3600_000): void {
-    // Simple approach: clear entire set periodically
-    // For a personal system this is sufficient
-    if (this.seenIds.size > 10_000) {
-      this.seenIds.clear();
+    const cutoff = Date.now() - maxAge;
+    for (const [key, timestamp] of this.seenIds) {
+      if (timestamp < cutoff) {
+        this.seenIds.delete(key);
+      }
     }
   }
 }

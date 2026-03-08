@@ -83,8 +83,10 @@ export class MessageInjector {
   }
 
   private async poll(): Promise<void> {
-    const msg = await this.kernelClient.getNextMessage();
-    if (msg) {
+    // Drain all available messages from kernel in one poll cycle
+    while (true) {
+      const msg = await this.kernelClient.getNextMessage();
+      if (!msg) break;
       logger.debug({ channel: msg.channel, sender: msg.sender.name }, "Polled message from kernel");
       this.push(msg);
     }

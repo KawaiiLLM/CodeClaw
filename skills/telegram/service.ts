@@ -101,8 +101,16 @@ async function main() {
         };
 
         if (content.type === "text") {
+          // Parse replyTo: handles both raw IDs and composite "tg-chatId-msgId" format
+          let replyMsgId: number | undefined;
+          if (replyTo) {
+            const idPart = replyTo.startsWith("tg-") ? replyTo.split("-").pop() : replyTo;
+            const parsed = idPart ? parseInt(idPart, 10) : NaN;
+            if (!isNaN(parsed)) replyMsgId = parsed;
+          }
+
           await bot.api.sendMessage(conversation, content.text, {
-            ...(replyTo ? { reply_parameters: { message_id: parseInt(replyTo, 10) } } : {}),
+            ...(replyMsgId ? { reply_parameters: { message_id: replyMsgId } } : {}),
           });
         }
 
@@ -152,10 +160,21 @@ async function main() {
 
 // --- Helpers ---
 
+const MAX_BODY_BYTES = 1_048_576; // 1MB
+
 function parseBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    let totalSize = 0;
+    req.on("data", (chunk: Buffer) => {
+      totalSize += chunk.length;
+      if (totalSize > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new Error("Payload too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => {
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString("utf-8")));

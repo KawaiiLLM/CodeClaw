@@ -134,21 +134,21 @@ export async function startAgentLoop(opts: {
         },
       },
     })) {
-      // Handle SDK events
-      if (event.type === "system" && "session_id" in event) {
-        const sessionId = (event as { session_id: string }).session_id;
-        logger.info({ sessionId }, "SDK session initialized");
-        await kernelClient.reportHealth(agentId, "alive", { sessionId });
+      // Handle SDK events with runtime-safe property access
+      const ev = event as Record<string, unknown>;
+
+      if (ev.type === "system" && typeof ev.session_id === "string") {
+        logger.info({ sessionId: ev.session_id }, "SDK session initialized");
+        await kernelClient.reportHealth(agentId, "alive", { sessionId: ev.session_id });
       }
 
-      if (event.type === "assistant" && "uuid" in event) {
-        const uuid = (event as { uuid: string }).uuid;
+      if (ev.type === "assistant" && typeof ev.uuid === "string") {
         await kernelClient.reportHealth(agentId, "busy", {
-          lastAssistantMessageId: uuid,
+          lastAssistantMessageId: ev.uuid,
         });
       }
 
-      if (event.type === "result") {
+      if (ev.type === "result") {
         logger.info("Agent produced a result");
       }
     }

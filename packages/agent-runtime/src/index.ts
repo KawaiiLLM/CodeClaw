@@ -18,6 +18,16 @@ async function main() {
   const injector = new MessageInjector(kernelClient);
   const skillServiceManager = new SkillServiceManager(kernelClient);
 
+  // Graceful shutdown — registered inside main() so cleanup runs properly
+  const shutdown = async () => {
+    logger.info("Shutting down...");
+    injector.stop();
+    await skillServiceManager.stopAll();
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => void shutdown());
+  process.on("SIGINT", () => void shutdown());
+
   // Start polling kernel for messages
   injector.start();
 
@@ -38,17 +48,6 @@ async function main() {
     await skillServiceManager.stopAll();
   }
 }
-
-// Graceful shutdown
-process.on("SIGTERM", () => {
-  logger.info("Received SIGTERM, shutting down...");
-  process.exit(0);
-});
-
-process.on("SIGINT", () => {
-  logger.info("Received SIGINT, shutting down...");
-  process.exit(0);
-});
 
 main().catch((err) => {
   logger.fatal({ err }, "Agent runtime startup failed");

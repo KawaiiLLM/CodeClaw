@@ -16,9 +16,10 @@ export class IOBridge {
   registerService(reg: SkillServiceRegistration): void {
     this.services.set(reg.skillId, reg);
     if (reg.type === "channel") {
-      this.channelIndex.set(reg.skillId, reg.skillId);
+      const channelName = reg.channel ?? reg.skillId;
+      this.channelIndex.set(channelName, reg.skillId);
     }
-    logger.info({ skillId: reg.skillId, type: reg.type, endpoint: reg.endpoint }, "Skill service registered");
+    logger.info({ skillId: reg.skillId, type: reg.type, channel: reg.channel, endpoint: reg.endpoint }, "Skill service registered");
   }
 
   /** Unregister a skill service. */
@@ -26,7 +27,8 @@ export class IOBridge {
     const reg = this.services.get(skillId);
     if (reg) {
       if (reg.type === "channel") {
-        this.channelIndex.delete(reg.skillId);
+        const channelName = reg.channel ?? reg.skillId;
+        this.channelIndex.delete(channelName);
       }
       this.services.delete(skillId);
       logger.info({ skillId }, "Skill service unregistered");
@@ -35,8 +37,10 @@ export class IOBridge {
 
   /** Look up the skill service for a given channel. */
   getServiceForChannel(channel: string): SkillServiceRegistration | null {
-    const skillId = this.channelIndex.get(channel) ?? channel;
-    return this.services.get(skillId) ?? null;
+    const skillId = this.channelIndex.get(channel);
+    if (skillId) return this.services.get(skillId) ?? null;
+    // Fallback: try skillId directly (for backward compat)
+    return this.services.get(channel) ?? null;
   }
 
   /** Get all registered services. */
