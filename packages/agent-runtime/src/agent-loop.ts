@@ -1,8 +1,11 @@
 import type { InboundMessage } from "@codeclaw/types";
-import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import Anthropic from "@anthropic-ai/sdk";
+import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { MessageInjector } from "./message-injector.js";
 import { KernelClient } from "./kernel-client.js";
 import { logger } from "./logger.js";
+
+// --- Helpers ---
 
 /**
  * Format an inbound message into the text the agent sees.
@@ -26,156 +29,144 @@ function formatMessageForAgent(msg: InboundMessage): string {
   return `${source} ${sender}: [Unknown content type]`;
 }
 
-/**
- * Wrap a text string into an SDKUserMessage for the Streaming Input API.
- */
-function toSDKUserMessage(text: string): SDKUserMessage {
-  return {
-    type: "user",
-    message: {
-      role: "user",
-      content: text,
-    },
-    parent_tool_use_id: null,
-    session_id: "",
-  };
+// --- Agent modes ---
+
+type AgentMode = "chat" | "stub";
+
+function detectMode(): AgentMode {
+  if (process.env.ANTHROPIC_API_KEY) return "chat";
+  return "stub";
 }
 
-/**
- * Create the AsyncGenerator that feeds messages into the Claude Agent SDK's
- * Streaming Input mode.
- */
-export async function* createMessageStream(
+// --- Chat mode: real Claude API via Anthropic SDK ---
+
+const SYSTEM_PROMPT = `You are CodeClaw, a personal AI assistant running inside a Docker container.
+You receive messages from various channels (Telegram, web, etc.) via a message queue.
+Each message is prefixed with [channel/conversationId] sender: content.
+Reply naturally and helpfully. Keep responses concise.
+You can use markdown formatting in your replies.`;
+
+const MAX_HISTORY = 50; // Keep last N messages for context
+
+async function runChatLoop(
   injector: MessageInjector,
-): AsyncGenerator<SDKUserMessage> {
-  logger.info("Message stream started, waiting for first message...");
+  kernelClient: KernelClient,
+  agentId: string,
+): Promise<void> {
+  const apiKey = process.env.ANTHROPIC_API_KEY!;
+  const baseURL = process.env.ANTHROPIC_BASE_URL;
+  const model = process.env.CLAUDE_MODEL ?? "aws-claude-opus-4-6";
+  const httpProxy = process.env.HTTP_PROXY ?? process.env.https_proxy;
 
-  // Wait for the first inbound message
-  const firstMsg = await injector.waitForMessage();
-  logger.info({ channel: firstMsg.channel, sender: firstMsg.sender.name }, "First message received");
-  yield toSDKUserMessage(formatMessageForAgent(firstMsg));
+  // Build a proxied fetch if HTTP_PROXY is set (for containers behind a firewall)
+  let customFetch: typeof globalThis.fetch | undefined;
+  if (httpProxy) {
+    const dispatcher = new ProxyAgent(httpProxy);
+    customFetch = ((input: any, init?: any) =>
+      undiciFetch(input, { ...init, dispatcher })) as unknown as typeof globalThis.fetch;
+    logger.info({ proxy: httpProxy }, "Using HTTP proxy for API calls");
+  }
 
-  // Continuous: yield new messages as they arrive
+  const client = new Anthropic({
+    apiKey,
+    ...(baseURL ? { baseURL } : {}),
+    ...(customFetch ? { fetch: customFetch } : {}),
+  });
+
+  logger.info({ model, baseURL: baseURL ?? "(default)" }, "Running in chat mode");
+
+  const history: Anthropic.MessageParam[] = [];
+
   while (true) {
     const msg = await injector.waitForMessage();
-    logger.info({ channel: msg.channel, sender: msg.sender.name }, "New message received");
+    const formatted = formatMessageForAgent(msg);
+    logger.info({ formatted }, "Chat: received message");
 
-    const pendingCount = injector.pendingCount();
-    if (pendingCount > 0) {
-      yield toSDKUserMessage(
-        `[System] New message + ${pendingCount} more pending:\n${formatMessageForAgent(msg)}`,
-      );
-    } else {
-      yield toSDKUserMessage(formatMessageForAgent(msg));
+    // Add to conversation history
+    history.push({ role: "user", content: formatted });
+
+    // Trim history if too long
+    while (history.length > MAX_HISTORY) {
+      history.shift();
     }
-  }
-}
 
-/**
- * Start the agent loop using the Claude Agent SDK.
- */
-export async function startAgentLoop(opts: {
-  injector: MessageInjector;
-  kernelClient: KernelClient;
-  agentId: string;
-  workspacePath: string;
-  mcpServerPath: string;
-  resumeSessionId?: string;
-}): Promise<void> {
-  const { injector, kernelClient, agentId, workspacePath, mcpServerPath, resumeSessionId } = opts;
+    await kernelClient.reportHealth(agentId, "busy").catch(() => {});
 
-  const kernelUrl = process.env.KERNEL_URL ?? "http://host.docker.internal:19000";
-
-  // Report initial health
-  await kernelClient.reportHealth(agentId, "alive").catch(() => {});
-
-  // Health report interval
-  const healthInterval = setInterval(async () => {
     try {
-      await kernelClient.reportHealth(agentId, "busy");
-    } catch {
-      // Kernel may be temporarily unavailable
-    }
-  }, 10_000);
-
-  try {
-    // Dynamic import — SDK may not be installed in dev environment
-    const sdk = await import("@anthropic-ai/claude-agent-sdk").catch(() => null);
-
-    // Fall back to stub if SDK unavailable or no API key configured
-    if (!sdk?.query || !process.env.ANTHROPIC_API_KEY) {
-      const reason = !sdk?.query ? "SDK not available" : "ANTHROPIC_API_KEY not set";
-      logger.warn({ reason }, "Running in stub mode");
-      await runStubLoop(injector, kernelClient, agentId);
-      return;
-    }
-
-    const messageStream = createMessageStream(injector);
-
-    logger.info({ agentId, workspacePath }, "Starting Agent SDK query with Streaming Input");
-
-    for await (const event of sdk.query({
-      prompt: messageStream,
-      options: {
-        cwd: workspacePath,
-        ...(resumeSessionId ? { resume: resumeSessionId } : {}),
-        systemPrompt: { type: "preset", preset: "claude_code" },
-        allowedTools: [
-          "Bash", "Read", "Write", "Edit", "Glob", "Grep",
-          "WebSearch", "WebFetch", "Agent",
-          "mcp__codeclaw__*",
-        ],
-        permissionMode: "bypassPermissions",
-        settingSources: ["project"],
-        mcpServers: {
-          codeclaw: {
-            command: "node",
-            args: [mcpServerPath],
-            env: { KERNEL_URL: kernelUrl },
-          },
-        },
-      },
-    })) {
-      // Handle SDK events with runtime-safe property access
-      const ev = event as Record<string, unknown>;
-
-      if (ev.type === "system" && typeof ev.session_id === "string") {
-        logger.info({ sessionId: ev.session_id }, "SDK session initialized");
-        await kernelClient.reportHealth(agentId, "alive", { sessionId: ev.session_id });
+      // Retry on transient network errors (up to 3 attempts)
+      let response: Anthropic.Message | undefined;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          response = await client.messages.create({
+            model,
+            max_tokens: 4096,
+            system: SYSTEM_PROMPT,
+            messages: history,
+          });
+          break;
+        } catch (err: any) {
+          const isRetryable = err?.type === "APIConnectionError" || err?.code === "ECONNRESET";
+          if (isRetryable && attempt < 3) {
+            logger.warn({ attempt, error: err.message }, "Chat: retrying after transient error");
+            await new Promise((r) => setTimeout(r, 1000 * attempt));
+            continue;
+          }
+          throw err;
+        }
       }
 
-      if (ev.type === "assistant" && typeof ev.uuid === "string") {
-        await kernelClient.reportHealth(agentId, "busy", {
-          lastAssistantMessageId: ev.uuid,
-        });
-      }
+      // Extract text from response
+      const textBlocks = response!.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text);
+      const replyText = textBlocks.join("\n") || "(No response)";
 
-      if (ev.type === "result") {
-        logger.info("Agent produced a result");
-      }
+      // Add assistant response to history
+      history.push({ role: "assistant", content: replyText });
+
+      logger.info(
+        { model: response!.model, inputTokens: response!.usage.input_tokens, outputTokens: response!.usage.output_tokens },
+        "Chat: Claude responded",
+      );
+
+      // Send reply back through kernel
+      await kernelClient.sendMessage({
+        channel: msg.channel,
+        conversation: msg.conversation.id,
+        content: { type: "text", text: replyText },
+        replyTo: msg.id,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err }, "Chat: API call failed");
+
+      // Send error message back so user knows something went wrong
+      await kernelClient.sendMessage({
+        channel: msg.channel,
+        conversation: msg.conversation.id,
+        content: { type: "text", text: `[Error] API call failed: ${message}` },
+        replyTo: msg.id,
+      }).catch(() => {});
     }
-  } finally {
-    clearInterval(healthInterval);
+
+    await kernelClient.reportHealth(agentId, "idle").catch(() => {});
   }
 }
 
-/**
- * Stub loop for development without the SDK.
- * Simply logs messages and echoes them back.
- */
+// --- Stub mode: echo replies for development ---
+
 async function runStubLoop(
   injector: MessageInjector,
   kernelClient: KernelClient,
   agentId: string,
 ): Promise<void> {
-  logger.info("Running stub agent loop (no SDK)");
+  logger.info("Running stub agent loop (no API key)");
 
   while (true) {
     const msg = await injector.waitForMessage();
     const formatted = formatMessageForAgent(msg);
     logger.info({ formatted }, "Stub agent received message");
 
-    // Echo response
     if (msg.content.type === "text") {
       try {
         await kernelClient.sendMessage({
@@ -193,5 +184,46 @@ async function runStubLoop(
     }
 
     await kernelClient.reportHealth(agentId, "idle");
+  }
+}
+
+// --- Entry point ---
+
+/**
+ * Start the agent loop. Automatically selects chat mode (with API key)
+ * or stub mode (without).
+ */
+export async function startAgentLoop(opts: {
+  injector: MessageInjector;
+  kernelClient: KernelClient;
+  agentId: string;
+  workspacePath: string;
+  mcpServerPath: string;
+  resumeSessionId?: string;
+}): Promise<void> {
+  const { injector, kernelClient, agentId } = opts;
+
+  // Report initial health
+  await kernelClient.reportHealth(agentId, "alive").catch(() => {});
+
+  // Health report interval
+  const healthInterval = setInterval(async () => {
+    try {
+      await kernelClient.reportHealth(agentId, "busy");
+    } catch {
+      // Kernel may be temporarily unavailable
+    }
+  }, 10_000);
+
+  try {
+    const mode = detectMode();
+
+    if (mode === "chat") {
+      await runChatLoop(injector, kernelClient, agentId);
+    } else {
+      await runStubLoop(injector, kernelClient, agentId);
+    }
+  } finally {
+    clearInterval(healthInterval);
   }
 }

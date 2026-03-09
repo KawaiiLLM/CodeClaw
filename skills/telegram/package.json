@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "@codeclaw/types": "workspace:*",
-    "grammy": "^1.35.0"
+    "grammy": "^1.35.0",
+    "undici": "^7.22.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.0",

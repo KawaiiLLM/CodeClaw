@@ -4,7 +4,7 @@ kernel:
 
 agent:
   id: andy
-  image: codeclaw/agent-runtime:latest
+  image: codeclaw/agent-runtime:dev
   workspace_volume: agent-andy-workspace
   api_key_env: ANTHROPIC_API_KEY
   default_model: opus

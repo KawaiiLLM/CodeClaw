@@ -1,6 +1,15 @@
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { Bot } from "grammy";
+
+// --- Proxy support (for environments behind a firewall) ---
+
+const HTTPS_PROXY = process.env.https_proxy ?? process.env.HTTPS_PROXY;
+const proxyAgent = HTTPS_PROXY ? new ProxyAgent(HTTPS_PROXY) : undefined;
+if (HTTPS_PROXY) {
+  console.log(`[telegram] Will proxy Telegram API via: ${HTTPS_PROXY}`);
+}
 
 // --- Configuration ---
 
@@ -28,6 +37,21 @@ function loadConfig(): TelegramConfig {
 async function main() {
   const config = loadConfig();
   const bot = new Bot(config.bot_token);
+
+  // Install proxy transformer for all Grammy API calls
+  if (proxyAgent) {
+    bot.api.config.use(async (prev, method, payload, signal) => {
+      const url = `https://api.telegram.org/bot${config.bot_token}/${method}`;
+      const res = await undiciFetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload ?? {}),
+        dispatcher: proxyAgent,
+      });
+      return (await res.json()) as ReturnType<typeof prev>;
+    });
+    console.log("[telegram] Proxy transformer installed for Grammy API calls");
+  }
 
   console.log(`[telegram] Starting with kernel at ${KERNEL_URL}`);
 
