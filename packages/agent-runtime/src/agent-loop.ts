@@ -8,6 +8,14 @@ import { logger } from "./logger.js";
 // --- Helpers ---
 
 /**
+ * Resolve the HTTP proxy URL from common environment variables.
+ */
+function resolveProxy(): string | undefined {
+  return process.env.HTTP_PROXY ?? process.env.HTTPS_PROXY
+    ?? process.env.http_proxy ?? process.env.https_proxy;
+}
+
+/**
  * Format an inbound message into the text the agent sees.
  */
 function formatMessageForAgent(msg: InboundMessage): string {
@@ -34,8 +42,9 @@ function formatMessageForAgent(msg: InboundMessage): string {
 type AgentMode = "chat" | "stub";
 
 function detectMode(): AgentMode {
-  if (process.env.ANTHROPIC_API_KEY) return "chat";
-  return "stub";
+  const mode = process.env.ANTHROPIC_API_KEY ? "chat" : "stub";
+  logger.info({ mode }, "Agent mode detected");
+  return mode;
 }
 
 // --- Chat mode: real Claude API via Anthropic SDK ---
@@ -48,6 +57,19 @@ You can use markdown formatting in your replies.`;
 
 const MAX_HISTORY = 50; // Keep last N messages for context
 
+/**
+ * Trim history to MAX_HISTORY and ensure it starts with a "user" message
+ * (required by the Anthropic Messages API).
+ */
+function trimHistory(history: Anthropic.MessageParam[]): void {
+  while (history.length > MAX_HISTORY) {
+    history.shift();
+  }
+  while (history.length > 0 && history[0].role !== "user") {
+    history.shift();
+  }
+}
+
 async function runChatLoop(
   injector: MessageInjector,
   kernelClient: KernelClient,
@@ -56,9 +78,9 @@ async function runChatLoop(
   const apiKey = process.env.ANTHROPIC_API_KEY!;
   const baseURL = process.env.ANTHROPIC_BASE_URL;
   const model = process.env.CLAUDE_MODEL ?? "aws-claude-opus-4-6";
-  const httpProxy = process.env.HTTP_PROXY ?? process.env.https_proxy;
+  const httpProxy = resolveProxy();
 
-  // Build a proxied fetch if HTTP_PROXY is set (for containers behind a firewall)
+  // Build a proxied fetch if HTTP proxy is set (for containers behind a firewall)
   let customFetch: typeof globalThis.fetch | undefined;
   if (httpProxy) {
     const dispatcher = new ProxyAgent(httpProxy);
@@ -82,13 +104,9 @@ async function runChatLoop(
     const formatted = formatMessageForAgent(msg);
     logger.info({ formatted }, "Chat: received message");
 
-    // Add to conversation history
+    // Add to conversation history and trim
     history.push({ role: "user", content: formatted });
-
-    // Trim history if too long
-    while (history.length > MAX_HISTORY) {
-      history.shift();
-    }
+    trimHistory(history);
 
     await kernelClient.reportHealth(agentId, "busy").catch(() => {});
 
@@ -105,7 +123,8 @@ async function runChatLoop(
           });
           break;
         } catch (err: any) {
-          const isRetryable = err?.type === "APIConnectionError" || err?.code === "ECONNRESET";
+          const isRetryable =
+            err instanceof Anthropic.APIConnectionError || err?.code === "ECONNRESET";
           if (isRetryable && attempt < 3) {
             logger.warn({ attempt, error: err.message }, "Chat: retrying after transient error");
             await new Promise((r) => setTimeout(r, 1000 * attempt));
@@ -115,8 +134,12 @@ async function runChatLoop(
         }
       }
 
+      if (!response) {
+        throw new Error("All retry attempts exhausted without a response");
+      }
+
       // Extract text from response
-      const textBlocks = response!.content
+      const textBlocks = response.content
         .filter((b): b is Anthropic.TextBlock => b.type === "text")
         .map((b) => b.text);
       const replyText = textBlocks.join("\n") || "(No response)";
@@ -125,7 +148,7 @@ async function runChatLoop(
       history.push({ role: "assistant", content: replyText });
 
       logger.info(
-        { model: response!.model, inputTokens: response!.usage.input_tokens, outputTokens: response!.usage.output_tokens },
+        { model: response.model, inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens },
         "Chat: Claude responded",
       );
 
@@ -139,6 +162,9 @@ async function runChatLoop(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err }, "Chat: API call failed");
+
+      // Add synthetic assistant message to maintain alternating roles (I3)
+      history.push({ role: "assistant", content: `[Error: ${message}]` });
 
       // Send error message back so user knows something went wrong
       await kernelClient.sendMessage({
@@ -192,6 +218,9 @@ async function runStubLoop(
 /**
  * Start the agent loop. Automatically selects chat mode (with API key)
  * or stub mode (without).
+ *
+ * Note: workspacePath, mcpServerPath, resumeSessionId are reserved for
+ * future SDK-based agent mode with tool use capabilities.
  */
 export async function startAgentLoop(opts: {
   injector: MessageInjector;
@@ -206,10 +235,10 @@ export async function startAgentLoop(opts: {
   // Report initial health
   await kernelClient.reportHealth(agentId, "alive").catch(() => {});
 
-  // Health report interval
+  // Heartbeat interval — reports "alive" so kernel knows agent is reachable
   const healthInterval = setInterval(async () => {
     try {
-      await kernelClient.reportHealth(agentId, "busy");
+      await kernelClient.reportHealth(agentId, "alive");
     } catch {
       // Kernel may be temporarily unavailable
     }

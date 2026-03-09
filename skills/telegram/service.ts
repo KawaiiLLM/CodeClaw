@@ -5,10 +5,11 @@ import { Bot } from "grammy";
 
 // --- Proxy support (for environments behind a firewall) ---
 
-const HTTPS_PROXY = process.env.https_proxy ?? process.env.HTTPS_PROXY;
-const proxyAgent = HTTPS_PROXY ? new ProxyAgent(HTTPS_PROXY) : undefined;
-if (HTTPS_PROXY) {
-  console.log(`[telegram] Will proxy Telegram API via: ${HTTPS_PROXY}`);
+const HTTP_PROXY = process.env.HTTP_PROXY ?? process.env.HTTPS_PROXY
+  ?? process.env.http_proxy ?? process.env.https_proxy;
+const proxyAgent = HTTP_PROXY ? new ProxyAgent(HTTP_PROXY) : undefined;
+if (HTTP_PROXY) {
+  console.log(`[telegram] Will proxy Telegram API via: ${HTTP_PROXY}`);
 }
 
 // --- Configuration ---
@@ -40,7 +41,7 @@ async function main() {
 
   // Install proxy transformer for all Grammy API calls
   if (proxyAgent) {
-    bot.api.config.use(async (prev, method, payload, signal) => {
+    bot.api.config.use(async (_prev, method, payload) => {
       const url = `https://api.telegram.org/bot${config.bot_token}/${method}`;
       const res = await undiciFetch(url, {
         method: "POST",
@@ -48,7 +49,10 @@ async function main() {
         body: JSON.stringify(payload ?? {}),
         dispatcher: proxyAgent,
       });
-      return (await res.json()) as ReturnType<typeof prev>;
+      if (!res.ok) {
+        console.error(`[telegram] API error: ${method} -> ${res.status}`);
+      }
+      return (await res.json()) as ReturnType<typeof _prev>;
     });
     console.log("[telegram] Proxy transformer installed for Grammy API calls");
   }

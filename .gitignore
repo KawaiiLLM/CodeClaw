@@ -6,6 +6,9 @@ dist/
 .env.*
 !.env.example
 
+# Secrets / config with tokens
+workspace-template/config/telegram.json
+
 # Reference repos (too large for version control)
 nanoclaw/
 openclaw/
