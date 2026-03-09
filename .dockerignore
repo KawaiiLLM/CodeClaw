@@ -1,0 +1,9 @@
+nanoclaw/
+openclaw/
+docs/
+.git/
+node_modules/
+**/node_modules/
+**/dist/
+*.md
+!packages/*/src/**

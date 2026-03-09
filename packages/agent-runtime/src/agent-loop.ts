@@ -102,8 +102,10 @@ export async function startAgentLoop(opts: {
     // Dynamic import — SDK may not be installed in dev environment
     const sdk = await import("@anthropic-ai/claude-agent-sdk").catch(() => null);
 
-    if (!sdk?.query) {
-      logger.warn("Claude Agent SDK not available, running in stub mode");
+    // Fall back to stub if SDK unavailable or no API key configured
+    if (!sdk?.query || !process.env.ANTHROPIC_API_KEY) {
+      const reason = !sdk?.query ? "SDK not available" : "ANTHROPIC_API_KEY not set";
+      logger.warn({ reason }, "Running in stub mode");
       await runStubLoop(injector, kernelClient, agentId);
       return;
     }
