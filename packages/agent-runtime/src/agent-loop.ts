@@ -1,9 +1,29 @@
 import type { InboundMessage } from "@codeclaw/types";
+import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import Anthropic from "@anthropic-ai/sdk";
+import type { MessageParam } from "@anthropic-ai/sdk/resources";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { MessageInjector } from "./message-injector.js";
 import { KernelClient } from "./kernel-client.js";
+import type { SkillServiceManager } from "./skill-service-manager.js";
 import { logger } from "./logger.js";
+
+// --- SDK dynamic import ---
+
+let sdkAvailable = false;
+let sdkQuery: typeof import("@anthropic-ai/claude-agent-sdk").query;
+let createSdkMcpToolsFn: typeof import("./sdk-mcp-tools.js").createSdkMcpTools;
+
+try {
+  const sdk = await import("@anthropic-ai/claude-agent-sdk");
+  sdkQuery = sdk.query;
+  const toolsMod = await import("./sdk-mcp-tools.js");
+  createSdkMcpToolsFn = toolsMod.createSdkMcpTools;
+  sdkAvailable = true;
+  logger.info("Claude Agent SDK loaded successfully");
+} catch (err) {
+  logger.info({ err }, "Claude Agent SDK not available, falling back to chat/stub");
+}
 
 // --- Helpers ---
 
@@ -15,10 +35,47 @@ function resolveProxy(): string | undefined {
     ?? process.env.http_proxy ?? process.env.https_proxy;
 }
 
+/** Detect image format from magic bytes. Returns a Claude-compatible media type or null. */
+function detectImageType(buf: Buffer): string | null {
+  if (buf[0] === 0xFF && buf[1] === 0xD8) return "image/jpeg";
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return "image/png";
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return "image/gif";
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+      buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return "image/webp";
+  return null;
+}
+
 /**
- * Format an inbound message into the text the agent sees.
+ * Download an image URL and return base64-encoded data with media type.
+ * Falls back to URL source if download fails.
  */
-function formatMessageForAgent(msg: InboundMessage): string {
+async function downloadImageAsBase64(
+  url: string,
+): Promise<{ type: "base64"; media_type: string; data: string } | { type: "url"; url: string }> {
+  try {
+    const httpProxy = resolveProxy();
+    const fetchOpts: Record<string, unknown> = {};
+    if (httpProxy) {
+      fetchOpts.dispatcher = new ProxyAgent(httpProxy);
+    }
+    const res = await undiciFetch(url, fetchOpts as any);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    // Detect media type from magic bytes, fallback to Content-Type header
+    const headerType = (res.headers.get("content-type") ?? "").split(";")[0].trim();
+    const mediaType = detectImageType(buf) ?? (headerType || "image/jpeg");
+    return { type: "base64", media_type: mediaType, data: buf.toString("base64") };
+  } catch (err) {
+    logger.warn({ err, url }, "Failed to download image, falling back to URL source");
+    return { type: "url", url };
+  }
+}
+
+/**
+ * Format an inbound message for the agent. Returns a string for text-only,
+ * or a content block array for multimodal (e.g. image) messages.
+ */
+async function formatMessageForAgent(msg: InboundMessage): Promise<MessageParam["content"]> {
   const source = `[${msg.channel}/${msg.conversation.id}]`;
   const sender = msg.sender.name;
 
@@ -26,7 +83,15 @@ function formatMessageForAgent(msg: InboundMessage): string {
     return `${source} ${sender}: ${msg.content.text}`;
   }
   if (msg.content.type === "image") {
-    return `${source} ${sender}: [Image] ${msg.content.caption ?? msg.content.url}`;
+    const imageSource = await downloadImageAsBase64(msg.content.url);
+    const blocks: Anthropic.ContentBlockParam[] = [
+      { type: "image", source: imageSource as any },
+    ];
+    const caption = msg.content.caption
+      ? `${source} ${sender}: ${msg.content.caption}`
+      : `${source} ${sender}: [Sent an image]`;
+    blocks.push({ type: "text", text: caption });
+    return blocks;
   }
   if (msg.content.type === "audio") {
     return `${source} ${sender}: [Audio ${msg.content.duration ?? "?"}s] ${msg.content.url}`;
@@ -39,12 +104,271 @@ function formatMessageForAgent(msg: InboundMessage): string {
 
 // --- Agent modes ---
 
-type AgentMode = "chat" | "stub";
+type AgentMode = "sdk" | "chat" | "stub";
 
 function detectMode(): AgentMode {
-  const mode = process.env.ANTHROPIC_API_KEY ? "chat" : "stub";
-  logger.info({ mode }, "Agent mode detected");
+  const hasKey = !!process.env.ANTHROPIC_API_KEY;
+  let mode: AgentMode;
+  if (sdkAvailable && hasKey) {
+    mode = "sdk";
+  } else if (hasKey) {
+    mode = "chat";
+  } else {
+    mode = "stub";
+  }
+  logger.info({ mode, sdkAvailable, hasKey }, "Agent mode detected");
   return mode;
+}
+
+// --- SDK mode: full Claude Code agent via Agent SDK ---
+
+const SDK_SYSTEM_APPEND = `You are CodeClaw, a personal AI agent running inside a Docker container.
+You receive messages from various channels (Telegram, web, etc.) via a message queue.
+Each message is prefixed with [channel/conversationId] sender: content.
+
+IMPORTANT RULES:
+- Use the send_message MCP tool to reply to users on their channel.
+- When replying, extract the channel and conversation ID from the message prefix.
+- You have full file system access in /workspace.
+- Keep responses concise and helpful.`;
+
+/**
+ * Bridges MessageInjector → AsyncIterable<SDKUserMessage> for the SDK query() stream input.
+ */
+class MessageStream {
+  private queue: SDKUserMessage[] = [];
+  private waiter: ((msg: SDKUserMessage | null) => void) | null = null;
+  private done = false;
+
+  push(content: MessageParam["content"], sessionId: string): void {
+    const msg: SDKUserMessage = {
+      type: "user",
+      message: { role: "user", content },
+      parent_tool_use_id: null,
+      session_id: sessionId,
+    };
+    if (this.waiter) {
+      const resolve = this.waiter;
+      this.waiter = null;
+      resolve(msg);
+    } else {
+      this.queue.push(msg);
+    }
+  }
+
+  end(): void {
+    this.done = true;
+    if (this.waiter) {
+      const resolve = this.waiter;
+      this.waiter = null;
+      resolve(null); // Unblock the iterator with a sentinel
+    }
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage, void> {
+    while (true) {
+      const queued = this.queue.shift();
+      if (queued) {
+        yield queued;
+        continue;
+      }
+      if (this.done) return;
+      const msg = await new Promise<SDKUserMessage | null>((resolve) => {
+        this.waiter = resolve;
+      });
+      if (msg === null) return; // Sentinel from end()
+      yield msg;
+    }
+  }
+}
+
+async function runSdkLoop(
+  injector: MessageInjector,
+  kernelClient: KernelClient,
+  agentId: string,
+  workspacePath: string,
+  resumeSessionId: string | undefined,
+  skillServiceManager: SkillServiceManager,
+): Promise<void> {
+  const model = process.env.CLAUDE_MODEL ?? "aws-claude-opus-4-6";
+  const baseURL = process.env.ANTHROPIC_BASE_URL;
+  const apiKey = process.env.ANTHROPIC_API_KEY!;
+  const httpProxy = resolveProxy();
+
+  logger.info({ model, baseURL: baseURL ?? "(default)", workspacePath }, "Running in SDK mode");
+
+  // Create MCP tools with double-send guard
+  const { server: mcpServer, wasSendMessageCalled, resetSendFlag } =
+    createSdkMcpToolsFn(kernelClient, skillServiceManager);
+
+  // Track last message for fallback reply routing
+  let lastMessage: InboundMessage | null = null;
+  let sessionId = "";
+
+  // Wait for the first message before starting the SDK query
+  const firstMsg = await injector.waitForMessage();
+  lastMessage = firstMsg;
+  const firstFormatted = await formatMessageForAgent(firstMsg);
+  logger.info({ formatted: firstFormatted }, "SDK: received first message");
+
+  await kernelClient.reportHealth(agentId, "busy").catch(() => {});
+
+  // Create the message stream and seed with first message
+  const stream = new MessageStream();
+  stream.push(firstFormatted, sessionId);
+  resetSendFlag();
+
+  // Background coroutine: continuously read from injector and push to stream
+  const pumpMessages = async () => {
+    while (true) {
+      try {
+        const msg = await injector.waitForMessage();
+        lastMessage = msg;
+        const formatted = await formatMessageForAgent(msg);
+        logger.info({ formatted: typeof formatted === "string" ? formatted : "[multimodal]" }, "SDK: injecting message");
+        resetSendFlag(); // Reset flag for the new turn
+        stream.push(formatted, sessionId);
+        await kernelClient.reportHealth(agentId, "busy").catch(() => {});
+      } catch (err) {
+        logger.error({ err }, "SDK: message pump error");
+        break;
+      }
+    }
+  };
+  const pumpPromise = pumpMessages();
+  pumpPromise.catch((err) => {
+    logger.error({ err }, "SDK: message pump crashed");
+    stream.end();
+  });
+
+  // Build environment for the SDK subprocess
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    ANTHROPIC_API_KEY: apiKey,
+    ...(baseURL ? { ANTHROPIC_BASE_URL: baseURL } : {}),
+    ...(httpProxy ? {
+      HTTP_PROXY: httpProxy,
+      HTTPS_PROXY: httpProxy,
+      http_proxy: httpProxy,
+      https_proxy: httpProxy,
+    } : {}),
+  };
+
+  const q = sdkQuery({
+    prompt: stream,
+    options: {
+      systemPrompt: {
+        type: "preset",
+        preset: "claude_code",
+        append: SDK_SYSTEM_APPEND,
+      },
+      settingSources: ["project"],
+      model,
+      cwd: workspacePath,
+      env,
+      mcpServers: {
+        codeclaw: mcpServer,
+      },
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      persistSession: true,
+      stderr: (data: string) => {
+        logger.warn({ stderr: data.trimEnd() }, "SDK: subprocess stderr");
+      },
+      ...(resumeSessionId ? { resume: resumeSessionId } : {}),
+    },
+  });
+
+  try {
+    for await (const msg of q) {
+      if (msg.type === "system") {
+        if (msg.subtype === "init") {
+          sessionId = msg.session_id;
+          logger.info(
+            { sessionId, model: msg.model, tools: msg.tools.length, mcpServers: msg.mcp_servers },
+            "SDK: session initialized",
+          );
+          await kernelClient.reportHealth(agentId, "busy", { sessionId }).catch(() => {});
+        } else {
+          logger.debug({ subtype: (msg as any).subtype }, "SDK: system message");
+        }
+        continue;
+      }
+
+      if (msg.type === "result") {
+        if (msg.subtype === "success") {
+          sessionId = msg.session_id;
+          logger.info(
+            {
+              sessionId: msg.session_id,
+              cost: msg.total_cost_usd,
+              turns: msg.num_turns,
+              durationMs: msg.duration_ms,
+              inputTokens: msg.usage.input_tokens,
+              outputTokens: msg.usage.output_tokens,
+              resultLength: msg.result?.length ?? 0,
+              sentViaTool: wasSendMessageCalled(),
+            },
+            "SDK: turn completed",
+          );
+
+          // Only auto-send result if send_message was NOT called by the agent
+          if (!wasSendMessageCalled() && msg.result && lastMessage) {
+            await kernelClient.sendMessage({
+              channel: lastMessage.channel,
+              conversation: lastMessage.conversation.id,
+              content: { type: "text", text: msg.result },
+              replyTo: lastMessage.id,
+            }).catch((err) => {
+              logger.error({ err }, "SDK: failed to send fallback result");
+            });
+          }
+        } else {
+          // Error result
+          const errors = "errors" in msg ? msg.errors : [];
+          logger.error({ subtype: msg.subtype, errors }, "SDK: turn error");
+
+          if (lastMessage) {
+            const errorText = errors.length > 0
+              ? `[Error] ${errors.join("; ")}`
+              : `[Error] Agent stopped: ${msg.subtype}`;
+            await kernelClient.sendMessage({
+              channel: lastMessage.channel,
+              conversation: lastMessage.conversation.id,
+              content: { type: "text", text: errorText },
+              replyTo: lastMessage.id,
+            }).catch(() => {});
+          }
+        }
+
+        resetSendFlag(); // Reset for next turn
+        await kernelClient.reportHealth(agentId, "idle", { sessionId }).catch(() => {});
+        continue;
+      }
+
+      // Other message types (assistant, stream_event, etc.) — log at debug level
+      if (msg.type === "assistant") {
+        logger.debug({ type: msg.type }, "SDK: assistant message");
+      }
+    }
+
+    logger.info("SDK: query stream ended");
+  } catch (err) {
+    logger.error({ err }, "SDK: query failed");
+
+    if (lastMessage) {
+      const message = err instanceof Error ? err.message : String(err);
+      await kernelClient.sendMessage({
+        channel: lastMessage.channel,
+        conversation: lastMessage.conversation.id,
+        content: { type: "text", text: `[Error] SDK agent crashed: ${message}` },
+        replyTo: lastMessage.id,
+      }).catch(() => {});
+    }
+  } finally {
+    stream.end();
+    try { q.close(); } catch { /* best effort */ }
+  }
 }
 
 // --- Chat mode: real Claude API via Anthropic SDK ---
@@ -101,8 +425,8 @@ async function runChatLoop(
 
   while (true) {
     const msg = await injector.waitForMessage();
-    const formatted = formatMessageForAgent(msg);
-    logger.info({ formatted }, "Chat: received message");
+    const formatted = await formatMessageForAgent(msg);
+    logger.info({ formatted: typeof formatted === "string" ? formatted : "[multimodal]" }, "Chat: received message");
 
     // Add to conversation history and trim
     history.push({ role: "user", content: formatted });
@@ -190,8 +514,8 @@ async function runStubLoop(
 
   while (true) {
     const msg = await injector.waitForMessage();
-    const formatted = formatMessageForAgent(msg);
-    logger.info({ formatted }, "Stub agent received message");
+    const formatted = await formatMessageForAgent(msg);
+    logger.info({ formatted: typeof formatted === "string" ? formatted : "[multimodal]" }, "Stub agent received message");
 
     if (msg.content.type === "text") {
       try {
@@ -216,21 +540,20 @@ async function runStubLoop(
 // --- Entry point ---
 
 /**
- * Start the agent loop. Automatically selects chat mode (with API key)
- * or stub mode (without).
- *
- * Note: workspacePath, mcpServerPath, resumeSessionId are reserved for
- * future SDK-based agent mode with tool use capabilities.
+ * Start the agent loop. Automatically selects the best available mode:
+ * - sdk:  Agent SDK + API key → full Claude Code agent with tools
+ * - chat: API key only → pure chat via Messages API
+ * - stub: no API key → echo for development
  */
 export async function startAgentLoop(opts: {
   injector: MessageInjector;
   kernelClient: KernelClient;
   agentId: string;
   workspacePath: string;
-  mcpServerPath: string;
   resumeSessionId?: string;
+  skillServiceManager: SkillServiceManager;
 }): Promise<void> {
-  const { injector, kernelClient, agentId } = opts;
+  const { injector, kernelClient, agentId, workspacePath, resumeSessionId, skillServiceManager } = opts;
 
   // Report initial health
   await kernelClient.reportHealth(agentId, "alive").catch(() => {});
@@ -247,7 +570,9 @@ export async function startAgentLoop(opts: {
   try {
     const mode = detectMode();
 
-    if (mode === "chat") {
+    if (mode === "sdk") {
+      await runSdkLoop(injector, kernelClient, agentId, workspacePath, resumeSessionId, skillServiceManager);
+    } else if (mode === "chat") {
       await runChatLoop(injector, kernelClient, agentId);
     } else {
       await runStubLoop(injector, kernelClient, agentId);

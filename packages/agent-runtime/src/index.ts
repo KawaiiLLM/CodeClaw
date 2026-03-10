@@ -8,7 +8,6 @@ async function main() {
   const agentId = process.env.AGENT_ID ?? "andy";
   const kernelUrl = process.env.KERNEL_URL ?? "http://localhost:19000";
   const workspacePath = process.env.WORKSPACE_PATH ?? "/workspace";
-  const mcpServerPath = process.env.MCP_SERVER_PATH ?? "/app/mcp-entry.js";
   const resumeSessionId = process.env.RESUME_SESSION_ID;
 
   logger.info({ agentId, kernelUrl, workspacePath }, "CodeClaw Agent Runtime starting...");
@@ -38,8 +37,8 @@ async function main() {
       kernelClient,
       agentId,
       workspacePath,
-      mcpServerPath,
       resumeSessionId,
+      skillServiceManager,
     });
   } catch (err) {
     logger.fatal({ err }, "Agent loop crashed");

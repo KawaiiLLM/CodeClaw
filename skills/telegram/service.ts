@@ -57,6 +57,12 @@ async function main() {
     console.log("[telegram] Proxy transformer installed for Grammy API calls");
   }
 
+  // Fetch bot info early so botUsername is available for handlers
+  await bot.api.getMe().then((me) => {
+    bot.botInfo = me;
+    console.log(`[telegram] Bot identity: @${me.username} (id: ${me.id})`);
+  });
+
   console.log(`[telegram] Starting with kernel at ${KERNEL_URL}`);
 
   // Register with kernel I/O Bridge
@@ -76,43 +82,154 @@ async function main() {
   }
   console.log("[telegram] Registered with kernel I/O Bridge");
 
+  // --- Helpers ---
+
+  const botUsername = bot.botInfo.username ?? "";
+
+  /** Check user allowlist. Returns true if allowed. */
+  function isUserAllowed(userId: number): boolean {
+    if (!config.allowed_users || config.allowed_users.length === 0) return true;
+    return config.allowed_users.includes(String(userId));
+  }
+
+  /** In group chats, only respond when @mentioned or replied to. */
+  function isRelevantInGroup(ctx: { chat: { type: string }; message?: { text?: string; caption?: string; reply_to_message?: { from?: { id: number } } } }): boolean {
+    if (ctx.chat.type === "private") return true;
+    const msg = ctx.message;
+    if (!msg) return false;
+    // Replied to the bot
+    if (msg.reply_to_message?.from?.id === bot.botInfo?.id) return true;
+    // @mentioned in text or caption
+    const text = msg.text ?? msg.caption ?? "";
+    if (botUsername && text.includes(`@${botUsername}`)) return true;
+    return false;
+  }
+
+  function makeSender(from: { id: number; first_name: string; last_name?: string }) {
+    return {
+      id: String(from.id),
+      name: from.first_name + (from.last_name ? ` ${from.last_name}` : ""),
+      channel: "telegram",
+    };
+  }
+
+  function makeConversation(chat: { id: number; type: string; title?: string }) {
+    return {
+      id: String(chat.id),
+      type: chat.type === "private" ? "dm" as const : "group" as const,
+      title: "title" in chat ? (chat as any).title : undefined,
+    };
+  }
+
+  /** Extract text from a reply_to_message for context. */
+  function getReplyContext(msg: { reply_to_message?: { text?: string; caption?: string; from?: { first_name: string; last_name?: string } } }): string {
+    const reply = msg.reply_to_message;
+    if (!reply) return "";
+    const replyText = reply.text ?? reply.caption;
+    if (!replyText) return "";
+    const who = reply.from
+      ? reply.from.first_name + (reply.from.last_name ? ` ${reply.from.last_name}` : "")
+      : "Someone";
+    return `[Replying to ${who}: "${replyText}"]\n`;
+  }
+
+  async function forwardToKernel(payload: Record<string, unknown>) {
+    await fetch(`${KERNEL_URL}/api/messages/inbound`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  }
+
   // --- Receive Telegram messages → forward to kernel ---
 
   bot.on("message:text", async (ctx) => {
-    // Check user allowlist
-    if (config.allowed_users && config.allowed_users.length > 0) {
-      if (!config.allowed_users.includes(String(ctx.from.id))) {
-        console.log(`[telegram] Ignoring message from non-allowed user: ${ctx.from.id}`);
+    if (!isUserAllowed(ctx.from.id)) return;
+    if (!isRelevantInGroup(ctx)) return;
+
+    // Strip @botUsername from text before forwarding
+    let text = ctx.message.text;
+    if (botUsername) {
+      text = text.replace(new RegExp(`@${botUsername}\\b`, "g"), "").trim();
+    }
+    const replyContext = getReplyContext(ctx.message);
+    text = replyContext + (text || "(mentioned you)");
+
+    // If replying to a photo or sticker, forward as image so the agent can see it
+    const reply = ctx.message.reply_to_message;
+    const replyImageFileId = reply?.photo?.length
+      ? reply.photo[reply.photo.length - 1].file_id
+      : reply?.sticker?.file_id ?? null;
+    if (replyImageFileId) {
+      try {
+        const file = await ctx.api.getFile(replyImageFileId);
+        const url = `https://api.telegram.org/file/bot${config.bot_token}/${file.file_path}`;
+        const payload = {
+          id: `tg-${ctx.chat.id}-${ctx.message.message_id}`,
+          channel: "telegram",
+          sender: makeSender(ctx.from),
+          conversation: makeConversation(ctx.chat),
+          content: { type: "image" as const, url, caption: text },
+          timestamp: ctx.message.date * 1000,
+        };
+        await forwardToKernel(payload);
+        console.log(`[telegram] Forwarded text+reply-image from ${ctx.from.first_name} to kernel`);
         return;
+      } catch (err) {
+        console.error("[telegram] Failed to get reply image, falling back to text:", err);
       }
     }
 
     const payload = {
       id: `tg-${ctx.chat.id}-${ctx.message.message_id}`,
       channel: "telegram",
-      sender: {
-        id: String(ctx.from.id),
-        name: ctx.from.first_name + (ctx.from.last_name ? ` ${ctx.from.last_name}` : ""),
-        channel: "telegram",
-      },
-      conversation: {
-        id: String(ctx.chat.id),
-        type: ctx.chat.type === "private" ? "dm" as const : "group" as const,
-        title: "title" in ctx.chat ? ctx.chat.title : undefined,
-      },
-      content: { type: "text" as const, text: ctx.message.text },
+      sender: makeSender(ctx.from),
+      conversation: makeConversation(ctx.chat),
+      content: { type: "text" as const, text },
       timestamp: ctx.message.date * 1000,
     };
 
     try {
-      await fetch(`${KERNEL_URL}/api/messages/inbound`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      console.log(`[telegram] Forwarded message from ${ctx.from.first_name} to kernel`);
+      await forwardToKernel(payload);
+      console.log(`[telegram] Forwarded text from ${ctx.from.first_name} to kernel`);
     } catch (err) {
       console.error("[telegram] Failed to forward message to kernel:", err);
+    }
+  });
+
+  // --- Photo messages → download URL + forward as image ---
+
+  bot.on("message:photo", async (ctx) => {
+    if (!isUserAllowed(ctx.from.id)) return;
+    if (!isRelevantInGroup(ctx)) return;
+
+    try {
+      // Pick the largest photo (last in the array)
+      const photos = ctx.message.photo;
+      const largest = photos[photos.length - 1];
+      const file = await ctx.api.getFile(largest.file_id);
+      const url = `https://api.telegram.org/file/bot${config.bot_token}/${file.file_path}`;
+
+      const replyContext = getReplyContext(ctx.message);
+      let caption = ctx.message.caption ?? "";
+      if (botUsername) {
+        caption = caption.replace(new RegExp(`@${botUsername}\\b`, "g"), "").trim();
+      }
+      caption = replyContext + (caption || "[Sent an image]");
+
+      const payload = {
+        id: `tg-${ctx.chat.id}-${ctx.message.message_id}`,
+        channel: "telegram",
+        sender: makeSender(ctx.from),
+        conversation: makeConversation(ctx.chat),
+        content: { type: "image" as const, url, caption },
+        timestamp: ctx.message.date * 1000,
+      };
+
+      await forwardToKernel(payload);
+      console.log(`[telegram] Forwarded photo from ${ctx.from.first_name} to kernel`);
+    } catch (err) {
+      console.error("[telegram] Failed to forward photo to kernel:", err);
     }
   });
 

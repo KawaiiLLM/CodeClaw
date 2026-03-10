@@ -1,19 +1,23 @@
 # CodeClaw 实施计划
 
-> 基于 V2 设计哲学文档，定义从零到可用的最小实现路径。
-> 目标：一个可运行的最小系统——内核 + 一个 Agent 容器 + Telegram 通道 Skill。
+> 基于 V3 设计哲学（`docs/plans/2026-03-10-design-philosophy-v3.md`），定义从 MVP 到完整系统的实现路径。
+> Phase 0-4 为 MVP 阶段（已完成），Phase 5+ 为基于 V3 哲学的增量迭代。
 
 ---
 
 ## 阶段概览
 
 ```
-Phase 0: 项目脚手架                    [预计 1 天]
-Phase 1: 最小内核                      [预计 3-5 天]
-Phase 2: Agent 容器运行时              [预计 2-3 天]
-Phase 3: 第一个通道 Skill (Telegram)   [预计 2-3 天]
-Phase 4: 端到端联调                    [预计 1-2 天]
-Phase 5: 迭代完善                      [持续]
+Phase 0: 项目脚手架                    [✅ 已完成]
+Phase 1: 最小内核                      [✅ 已完成]
+Phase 2: Agent 容器运行时              [✅ 已完成] (SDK/chat/stub 三层模式)
+Phase 3: 第一个通道 Skill (Telegram)   [✅ 已完成] (图片/贴纸/群聊@过滤)
+Phase 4: 端到端联调                    [✅ 已完成] (SDK 模式全链路验证)
+Phase 5: 思考链流式输出                [待开始] — 设计方向 4: Code-first UX
+Phase 6: 安全约束与审批                [待开始] — 设计方向 5: 三层安全
+Phase 7: 结构化记忆                    [待开始] — 设计方向 1: 存在感核心
+Phase 8: Skill 自安装体验              [待开始] — 设计方向 3: Agent 是开发者
+Phase 9: 开源发布准备                  [待开始] — CLI + 文档 + 安装体验
 ```
 
 ---
@@ -643,72 +647,302 @@ cd packages/kernel && tsx src/index.ts
 
 ---
 
-## Phase 5: 迭代完善
+## Phase 5: 思考链流式输出
 
-Phase 4 跑通后，按优先级迭代：
+> 设计方向 4 — Code-first UX: 看得见的思考
 
-### 5.1 近期（P0）
-- **CLI 管理工具**：`codeclaw start`, `codeclaw stop`, `codeclaw logs`, `codeclaw status`
-- **错误处理加固**：内核/Agent/Skill 各层的异常处理和日志
-- **消息间隙注入**：Agent 处理长任务时，新消息的系统通知插入
-- **Skill 安装体验**：通过自然语言告诉 agent "安装 Telegram"
+### 目标
+Agent 执行复杂任务时，用户在 Telegram 看到实时更新的思考过程，而不是长时间的沉默。
 
-### 5.2 中期（P1）
-- **Web UI Skill**：简单的网页聊天界面
-- **分层模型**：简单消息用 Haiku，复杂任务用用户选择的主模型
-- **SQLite FTS5 记忆**：Agent 可存取结构化记忆
-- **定时任务**：Agent 可自行安排 cron 任务（内核或 Skill 层实现）
-- **多 Skill 通道**：Discord, Slack 等
+### 核心机制
+通过 Telegram `editMessageText` 不断更新同一条消息，展示 Agent 的工具调用链：
 
-### 5.3 远期（P2）
-- **多 Agent 实例**：多个独立容器，各有自己的人格和记忆
-- **Agent 间通信**：Agent A 可以请求 Agent B 协助
-- **Skill 市场**：标准化的 Skill 包格式，可分享/安装
-- **移动端通道**：iOS/Android 原生 app
+```
+🔍 正在读取 config.yaml...
+```
+→ 编辑为 →
+```
+🔍 读取了 config.yaml
+📝 正在修改端口配置...
+```
+→ 最终编辑为 →
+```
+✅ 已将端口从 3000 改为 8080，测试通过。
+```
+
+### 任务
+
+**5.1 Agent → Kernel 进度通道**
+- 在 Kernel HTTP API 新增 `POST /api/messages/progress`
+- 消息格式：`{ channel, conversation, messageId?, text }` — 有 messageId 则编辑，无则新建
+- Kernel 转发给对应 Channel Skill
+
+**5.2 Channel Skill 编辑消息支持**
+- Telegram Skill 新增 `POST /edit` 端点（或扩展现有 `/send`）
+- 调用 `bot.api.editMessageText(chatId, messageId, text)`
+- 返回 messageId 供后续编辑
+
+**5.3 SDK 事件流 → 进度提取**
+- 在 `agent-loop.ts` 的 `for await (const msg of q)` 中，拦截 `assistant` 类型消息
+- 提取工具调用名称和参数摘要，格式化为进度文本
+- 节流：最多 1 次/秒编辑（Telegram API 软限制）
+
+**5.4 MCP 进度工具**
+- 在 `sdk-mcp-tools.ts` 新增 `update_progress` 工具
+- Agent 也可以主动报告进度（而不仅仅是自动提取）
+
+### 验证
+- [ ] Agent 执行多步工具调用时，Telegram 消息实时更新
+- [ ] 编辑频率不超过 1 次/秒
+- [ ] 最终消息替换为完整回复
+
+---
+
+## Phase 6: 安全约束与审批
+
+> 设计方向 5 — 三层安全: 隔离 + 约束 + 审批
+
+### 目标
+在 Docker 隔离（已有）之上，增加白名单约束和 Emoji 审批。
+
+### 三层模型
+```
+Layer 1: Docker 隔离        [✅ 已有] 非 root, volume mount, 网络代理
+Layer 2: 约束白名单          [待实现] Agent 能做什么
+Layer 3: 交互式审批          [待实现] 危险操作需人类确认
+```
+
+### 任务
+
+**6.1 约束白名单 (Kernel 级)**
+- `codeclaw.yaml` 新增 `security` 配置段：
+  ```yaml
+  security:
+    outbound_channels: ["telegram"]        # Agent 能发消息的通道
+    allowed_conversations: []              # 空 = 不限制; 非空 = 白名单
+    approvers: ["telegram:12345678"]       # 有审批权的用户 (channel:userId)
+  ```
+- Kernel 的 `IOBridge.routeOutbound()` 在转发前检查白名单
+- 白名单存在容器外（Kernel 配置），Agent 无法修改自己的约束
+
+**6.2 Emoji 审批协议**
+- 新增 Kernel API: `POST /api/approval/request` + `POST /api/approval/respond`
+- 流程：
+  1. Agent MCP 工具触发审批 → Kernel 创建 pending approval
+  2. Kernel 通过 Channel Skill 发审批消息到 Telegram
+  3. 用户 react 👍/👎 → Telegram Skill 检测 `message_reaction` → 回调 Kernel
+  4. Kernel 通知 Agent 审批结果
+- 超时：可配置（默认 5 分钟），超时自动拒绝
+
+**6.3 Telegram Skill 支持 Reaction 检测**
+- Grammy: `bot.on("message_reaction")` 监听 reaction 事件
+- 验证 reactor 是否在 approvers 白名单中
+- 匹配 reaction 到 pending approval（通过 messageId）
+
+**6.4 Agent 侧审批 MCP 工具**
+- 新增 `request_approval` MCP 工具
+- Agent 在执行危险操作前主动调用
+- 阻塞等待审批结果后继续
+
+### 验证
+- [ ] 非白名单通道的出站消息被 Kernel 拒绝
+- [ ] Agent 调用 `request_approval` → Telegram 出现审批消息
+- [ ] 白名单用户 react 👍 → Agent 收到批准并继续
+- [ ] 超时 → Agent 收到拒绝
+- [ ] 非白名单用户的 reaction 被忽略
+
+---
+
+## Phase 7: 结构化记忆
+
+> 设计方向 1 — 存在感核心: 记忆 + 主动行为 + 工作连续性
+
+### 目标
+Agent 拥有跨会话、跨通道的持久记忆，能记住用户偏好和历史事实。
+
+### 架构
+```
+/workspace/memory/
+├── knowledge.db       # SQLite FTS5 — 结构化事实和偏好
+├── notes/             # Markdown 长篇笔记和总结
+└── index.md           # Agent 自维护的记忆索引
+```
+
+### 任务
+
+**7.1 SQLite FTS5 记忆数据库**
+- Agent 通过 Bash 工具操作 SQLite（不需要额外 MCP 工具）
+- 表结构：
+  ```sql
+  CREATE VIRTUAL TABLE memories USING fts5(
+    key,              -- 唯一标识 (user_preference:timezone)
+    content,          -- 记忆内容
+    category,         -- 分类 (fact, preference, event, note)
+    source,           -- 来源 (telegram:chat_123, manual)
+    created_at,
+    accessed_at,
+    access_count,
+    importance        -- 0.0-1.0
+  );
+  ```
+
+**7.2 workspace CLAUDE.md 记忆指引**
+- 更新 `workspace-template/CLAUDE.md`，增加记忆管理指南
+- 告诉 Agent 何时存记忆、如何检索、如何衰减过时信息
+
+**7.3 时间衰减评分**（参考 TinyClaw）
+- 检索时的相关性公式：
+  `relevance = fts5_rank × 0.4 + temporal_score × 0.3 + importance × 0.3`
+- 其中 `temporal_score = e^(-0.05 × days) × (1 + 0.02 × access_count)`
+- Agent 在 CLAUDE.md 中理解这个公式，自行实现检索逻辑
+
+### 验证
+- [ ] Agent 被告知用户偏好 → 存入 knowledge.db
+- [ ] 后续对话中 Agent 检索到之前的偏好
+- [ ] 旧记忆的 temporal_score 逐渐衰减
+- [ ] Agent 容器重启后记忆保留
+
+---
+
+## Phase 8: Skill 自安装体验
+
+> 设计方向 3 — Agent 是开发者: 写代码就是最自然的配置方式
+
+### 目标
+用户说 "帮我装一个天气推送"，Agent 自己完成全部安装流程。
+
+### 两种 Skill 形态
+
+| | 通道 Skill | 工具 Skill |
+|---|---|---|
+| 例子 | Telegram, Discord, Web | 天气查询, 翻译, 计算 |
+| 运行方式 | 独立进程，持续监听 | Agent 自写脚本，按需调用 |
+| 注册 | 向 Kernel 注册 | 不需要注册 |
+| 位置 | `skills/<name>/` (monorepo) | `/workspace/skills/<name>/` (Agent workspace) |
+
+### 任务
+
+**8.1 Skill 模板**
+- 在 `workspace-template/skills/` 放一个 `SKILL_TEMPLATE.md`
+- 描述两种 Skill 的标准结构
+- Agent 按模板生成新 Skill
+
+**8.2 通道 Skill 标准化**
+- 定义通道 Skill 的最小接口：
+  ```
+  POST /send           — 接收出站消息
+  POST /edit           — 编辑已发送消息 (Phase 5 新增)
+  GET  /health         — 健康检查
+  ```
+- 所有通道 Skill 遵守此接口，Kernel 不感知具体平台
+
+**8.3 Skill 安装流程（Agent 自主执行）**
+- 用户: "帮我装个 Discord 通道"
+- Agent:
+  1. 在 workspace 创建 `skills/discord/`
+  2. 写 `service.ts`（参考 Telegram Skill 的结构）
+  3. 写 `MANUAL.md`
+  4. 写 `package.json`
+  5. 安装依赖
+  6. 向用户询问 bot token
+  7. 写配置文件
+  8. 通过 `start_skill_service` MCP 工具启动
+  9. 验证注册成功
+
+**8.4 工具 Skill 安装流程（更简单）**
+- 用户: "帮我加个天气查询"
+- Agent:
+  1. 在 `/workspace/skills/weather/` 写一个脚本
+  2. 测试脚本能跑
+  3. 记在记忆里："有天气查询 Skill，路径是 /workspace/skills/weather/query.ts"
+  4. 之后需要天气信息时直接 `tsx /workspace/skills/weather/query.ts --city=Shanghai`
+
+### 验证
+- [ ] Agent 能按模板创建新通道 Skill
+- [ ] Agent 能自主安装工具 Skill 并在后续对话中使用
+- [ ] `list_skill_services` 正确反映运行中的通道 Skill
+
+---
+
+## Phase 9: 开源发布准备
+
+### 目标
+让非作者用户能在 15 分钟内跑起来。
+
+### 任务
+
+**9.1 CLI 工具**
+- `codeclaw init` — 初始化配置和 workspace
+- `codeclaw start` — 启动 Kernel + Agent 容器
+- `codeclaw stop` — 优雅停止
+- `codeclaw logs` — 查看 Agent 日志
+- `codeclaw status` — 系统状态总览
+
+**9.2 一键启动**
+- `docker-compose.yml`：Kernel + Agent + 持久化卷
+- 或 `codeclaw start` 一条命令搞定
+
+**9.3 文档**
+- README.md: 30 秒看懂是什么、5 分钟装好
+- 架构文档: 给想贡献的人看
+- Skill 开发指南: 如何写通道 Skill 和工具 Skill
+
+**9.4 代码清理**
+- 移除硬编码的代理地址和 API key
+- 配置模板化（`.env.example`）
+- GitHub Actions CI: lint + type-check
+
+---
+
+## 远期方向（不排期）
+
+按需启动，不预先规划：
+
+- **多 Agent 实例**：多个独立容器，各有人格和记忆
+- **Agent 间通信**：Agent A 请求 Agent B 协助
+- **人格 Skill**：种子人格生成（Big Five / MBTI），可选安装
+- **分层模型路由**：简单问题用 Haiku，复杂任务用 Opus（参考 TinyClaw Smart Router）
+- **定时任务**：Agent 自行安排 cron（proactive behavior）
+- **多通道 Skill**：Discord, Slack, Web UI, CLI
 - **语音**：TTS/STT 集成
+- **Skill 市场**：标准化 Skill 包格式，社区分享
 
 ---
 
 ## 技术决策记录
 
-| 决策 | 选择 | 理由 |
-|------|------|------|
-| 内核语言 | TypeScript | 与 SDK 生态一致，类型安全 |
-| 内核 ↔ 容器通信 | HTTP | 简单、可调试、跨语言；后续可切换 Unix Socket |
-| 容器运行时 | Docker | 成熟、跨平台；未来可支持 Podman |
-| 消息队列 | 内存 (TypeScript Map/Array) | 个人系统规模小，不需要 Redis |
-| 持久化 | Docker Volume | 简单、容器重启不丢数据 |
-| SDK 使用模式 | Streaming Input | 长驻进程，避免 12s/次的启动开销 |
-| Session 存储 | SDK 原生 JSONL | 不对抗框架，resume 直接可用 |
-| Agent 侧数据库 | SQLite | 轻量、无外部依赖、FTS5 够用 |
-| 第一个通道 | Telegram | grammy 库成熟，Webhook 模式简单 |
-| 安全模型 | Docker 容器隔离 | 容器即沙箱，不需要 Bash 白名单 |
-
----
-
-## 风险和缓解
-
-| 风险 | 概率 | 影响 | 缓解 |
+| 决策 | 选择 | 理由 | 阶段 |
 |------|------|------|------|
-| SDK Streaming Input 不稳定 | 低 | 高 | 降级到 per-message query() + session resume |
-| Docker 容器网络配置复杂 | 中 | 中 | Phase 0 先验证网络连通性 |
-| Agent 首次响应慢 (12s) | 确定 | 中 | Streaming Input 避免重复启动；首条消息可提示"正在启动" |
-| Skill 服务崩溃 | 中 | 中 | 内核进程监督自动重启 |
-| 长期运行内存泄漏 | 中 | 中 | 定期健康检查 + 容器自动重启策略 |
-| CLAUDE.md 复杂度增长 | 低 | 高 | 严格控制核心内容 <200 行，Skill 知识在 MANUAL.md |
+| 内核语言 | TypeScript ESM | 与 SDK 生态一致，类型安全 | Phase 0 |
+| 内核 ↔ 容器通信 | HTTP | 简单、可调试、跨语言 | Phase 1 |
+| 容器运行时 | Docker (Colima on macOS) | 成熟、跨平台 | Phase 1 |
+| 消息队列 | 内存优先级队列 | 个人系统规模小，不需要 Redis | Phase 1 |
+| SDK 使用模式 | Streaming Input | 长驻进程，避免 12s/次启动开销 | Phase 2 |
+| Agent 三层模式 | SDK → chat → stub | 优雅降级，无 SDK 时仍可用 | Phase 2 |
+| Double-send guard | 闭包 flag | 防止 MCP send + fallback result 重复发送 | Phase 2 |
+| 非 root 容器 | `codeclaw` 用户 | SDK bypassPermissions 拒绝 root | Phase 2 |
+| 第一个通道 | Telegram (grammy) | 库成熟，长轮询模式简单 | Phase 3 |
+| 图片处理 | base64 + magic bytes | 绕过不可靠的 Content-Type header | Phase 3 |
+| 进度展示 | Telegram editMessageText | 流式思考链，Code-first UX | Phase 5 |
+| 安全模型 | Docker 隔离 + 白名单 + Emoji 审批 | 三层防御，渐进式 | Phase 6 |
+| Agent 记忆 | SQLite FTS5 | 轻量、无外部依赖、全文检索 | Phase 7 |
+| Skill 安装 | Agent 自己写代码 | 对 Claude Code Agent 最自然的方式 | Phase 8 |
 
 ---
 
-## 最小可验证里程碑
+## 里程碑
 
-**M1: 内核能收发 HTTP 消息**（Phase 1 完成）
-- 用 curl 发消息到内核 → 队列入队 → 查询队列 → 消息在
-
-**M2: Agent 容器能启动并与内核通信**（Phase 2 完成）
-- 容器启动 → Agent 进程运行 → 通过 MCP 调用内核 API → 成功
-
-**M3: Agent 能回复通过 curl 发送的消息**（Phase 2+3 部分）
-- curl 发消息到内核 → Agent 收到 → Agent 回复 → 内核有出站消息
-
-**M4: Telegram 端到端**（Phase 4 完成）
-- Telegram 发消息 → Bot 收到 → 内核 → Agent → 回复 → Telegram 显示
+| 里程碑 | 阶段 | 状态 | 验证方式 |
+|--------|------|------|---------|
+| M1: 内核 HTTP API | Phase 1 | ✅ | curl 收发消息 |
+| M2: Agent 容器通信 | Phase 2 | ✅ | 容器启动 + 轮询内核 |
+| M3: Agent 回复消息 | Phase 2 | ✅ | Claude API 对话 |
+| M4: Telegram 端到端 | Phase 4 | ✅ | TG → Agent → TG 全链路 |
+| M5: SDK Agent 模式 | Phase 4 | ✅ | SDK query() + MCP tools |
+| M6: Telegram 多媒体 | Phase 4 | ✅ | 图片/贴纸 → Claude Vision |
+| M7: 群聊 @过滤 | Phase 4 | ✅ | 群聊仅 @bot 时响应 |
+| M8: 思考链流式 | Phase 5 | 🔲 | Telegram 消息实时更新工具调用 |
+| M9: Emoji 审批 | Phase 6 | 🔲 | 👍 批准危险操作 |
+| M10: 持久记忆 | Phase 7 | 🔲 | 跨会话记住用户偏好 |
+| M11: Skill 自安装 | Phase 8 | 🔲 | "装个天气查询" → Agent 自己完成 |
+| M12: 一键启动 | Phase 9 | 🔲 | `codeclaw start` 15 分钟跑起来 |

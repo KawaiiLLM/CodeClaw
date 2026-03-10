@@ -25,9 +25,15 @@ COPY packages/agent-runtime/ packages/agent-runtime/
 # Install pnpm and dependencies
 RUN npm install -g pnpm && pnpm config set registry https://registry.npmmirror.com && pnpm install --no-frozen-lockfile
 
+# Create non-root user (Claude Code SDK refuses bypassPermissions as root)
+RUN useradd -m -s /bin/bash codeclaw && \
+    mkdir -p /workspace && chown codeclaw:codeclaw /workspace
+
 # Workspace is mounted as a volume
 VOLUME /workspace
 WORKDIR /workspace
+
+USER codeclaw
 
 # Start agent runtime with tsx
 CMD ["tsx", "/codeclaw/packages/agent-runtime/src/index.ts"]
