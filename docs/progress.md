@@ -1,8 +1,7 @@
 # CodeClaw 实现进度记录
 
-> 最后更新: 2026-03-10
-> 最新提交: `b499753` fix: address code review Critical and Important issues (round 2)
-> 未提交变更: SDK agent loop 实现、Telegram 多媒体/群聊增强、Dockerfile 非 root 用户
+> 最后更新: 2026-03-13
+> 最新提交: `6d26bf7` fix: address code review Critical and Important issues
 
 ---
 
@@ -15,7 +14,8 @@
 | Phase 2: Agent 容器运行时 | ✅ 完成 | SDK/chat/stub 三层模式均已实现并验证 |
 | Phase 3: Telegram Skill | ✅ 完成 | grammy + 代理 + 图片/贴纸 + 群聊@过滤 |
 | Phase 4: 端到端联调 | ✅ 完成 | SDK 模式全链路已验证 (Telegram → Agent SDK → Claude → Telegram) |
-| Phase 5: 迭代完善 | 🔲 未开始 | |
+| Phase 5a: Home 目录迁移 | ✅ 完成 | /workspace → /home/codeclaw, JSONL 聊天持久化, 通知风格消息 |
+| Phase 5: 迭代完善 | 🔧 进行中 | |
 
 ---
 
@@ -76,6 +76,11 @@ codeclaw/
 ## 提交历史
 
 ```
+6d26bf7 fix: address code review Critical and Important issues
+227c239 refactor: migrate from /workspace to /home/codeclaw + JSONL chat persistence
+a292161 docs: refine design philosophy — filesystem-as-context, agent-as-user, SKILL.md
+677dd45 docs: home directory migration implementation plan
+ff869fd feat: SDK agent mode, Telegram media/group enhancements, docs
 b499753 fix: address code review Critical and Important issues (round 2)
 ba63647 feat: Telegram end-to-end + Claude API chat mode via proxy
 51e41ca feat: Phase 4 integration - Docker dev image and stub mode fixes
@@ -163,7 +168,7 @@ docker run -d --name codeclaw-agent-andy --rm \
 
 # 4. 启动 Telegram Skill (host 进程, port 7001)
 export https_proxy=http://127.0.0.1:7890
-export CONFIG_PATH=/path/to/workspace-template/config/telegram.json
+export CONFIG_PATH=~/.claude/config/telegram.json
 export KERNEL_URL=http://localhost:19000
 npx tsx skills/telegram/service.ts &
 
@@ -185,6 +190,7 @@ docker logs codeclaw-agent-andy         # 查看 agent 日志
 | M5: SDK Agent 模式 | ✅ | Agent SDK query() + MCP tools + session resume 全链路 |
 | M6: Telegram 多媒体 | ✅ | 图片 / 贴纸 / 回复引用 → base64 multimodal → Claude Vision |
 | M7: 群聊 @提及过滤 | ✅ | 群聊仅在 @bot 或回复 bot 时响应 |
+| M8: Home 目录迁移 | ✅ | /workspace → /home/codeclaw, JSONL 聊天持久化, 通知风格消息 |
 
 ---
 
@@ -202,8 +208,8 @@ docker logs codeclaw-agent-andy         # 查看 agent 日志
 2. **Telegram Skill 代理**: 使用 Grammy transformer + undici ProxyAgent 绕过 Node.js 内置 fetch 不识别代理的问题; transformer 硬编码 `Content-Type: application/json`, 不支持 multipart/form-data
 3. **Chat 模式无工具**: chat 模式仍为纯文字对话, 无 MCP 工具集成 (mcp-server.ts 未在 chat 模式中使用)
 4. **Skill 安装体验**: 当前手动配置, 未实现通过自然语言安装
-5. **Telegram 音频/文件/视频消息**: 仅支持 photo 和 sticker, 其他媒体类型尚未处理
-6. **变更未提交**: 本批 SDK 实现 + Telegram 增强 + Dockerfile 改动尚未 git commit
+5. **Telegram 音频/贴纸/视频消息**: DM 中 sticker/audio/voice/video 被静默丢弃, 仅群聊 buffer
+6. **JSONL 同步写入**: `appendFileSync` 在高消息量下可能阻塞 event loop, 考虑异步写入
 
 ---
 
