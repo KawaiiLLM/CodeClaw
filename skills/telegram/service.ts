@@ -100,7 +100,8 @@ async function main() {
   function saveFile(chatId: string, msgId: string, filename: string, buf: Buffer): { absPath: string; relPath: string } {
     const filesDir = join(DATA_DIR, chatId, "files");
     ensureDir(filesDir);
-    const safeName = `${msgId}_${filename}`;
+    const sanitized = filename.replace(/[/\\]/g, "_");
+    const safeName = `${msgId}_${sanitized}`;
     const absPath = join(filesDir, safeName);
     writeFileSync(absPath, buf);
     const relPath = `files/${safeName}`;
@@ -282,7 +283,7 @@ async function main() {
     // --- Forward based on message type ---
     const sender = makeSender(ctx.from);
     const conversation = makeConversation(ctx.chat);
-    const baseId = `tg-${ctx.chat.id}-${msg.message_id}`;
+    const baseId = `tg_${ctx.chat.id}_${msg.message_id}`;
     const timestamp = msg.date * 1000;
 
     try {
@@ -308,6 +309,12 @@ async function main() {
               id: baseId, channel: "telegram", sender, conversation,
               content: { type: "image" as const, url, caption: text },
               timestamp,
+            });
+            appendToLog(String(ctx.chat.id), {
+              id: baseId, ts: timestamp,
+              sender: { id: sender.id, name: sender.name },
+              type: "text", text: msg.text,
+              replyTo: msg.reply_to_message ? `tg_${ctx.chat.id}_${msg.reply_to_message.message_id}` : null,
             });
             console.log(`[telegram] Forwarded text+reply-image from ${senderName}`);
             return;
@@ -434,7 +441,7 @@ async function main() {
           // Parse replyTo: handles both raw IDs and composite "tg-chatId-msgId" format
           let replyMsgId: number | undefined;
           if (replyTo) {
-            const idPart = replyTo.startsWith("tg-") ? replyTo.split("-").pop() : replyTo;
+            const idPart = replyTo.startsWith("tg_") ? replyTo.split("_").pop() : replyTo;
             const parsed = idPart ? parseInt(idPart, 10) : NaN;
             if (!isNaN(parsed)) replyMsgId = parsed;
           }

@@ -84,7 +84,7 @@ function formatSize(bytes: number): string {
  * Short text shown in full; long text/files show preview + path for Read/Grep.
  */
 async function formatMessageForAgent(msg: InboundMessage): Promise<MessageParam["content"]> {
-  const tag = `[${msg.channel}]`;
+  const tag = `[${msg.channel}/${msg.conversation.id}]`;
   const sender = msg.sender.name;
   const replyTag = msg.replyTo ? ` (replying to ${msg.replyTo})` : "";
 
@@ -154,11 +154,11 @@ const SDK_SYSTEM_APPEND = `You are CodeClaw, a personal AI agent running inside 
 Your home directory is ~ (/home/codeclaw). This is your persistent workspace.
 
 You receive messages from various channels (Telegram, web, etc.) via a message queue.
-Messages are formatted as notifications: [channel] Sender: content preview.
+Messages are formatted as notifications: [channel/conversationId] Sender: content preview.
 
 IMPORTANT RULES:
 - Use the send_message MCP tool to reply to users on their channel.
-- When replying, use the channel name from the [channel] tag and the conversation ID from the message metadata.
+- When replying, extract the channel and conversation ID from the [channel/conversationId] tag.
 - For long messages or files, the full content path is shown after "→". Use Read or Grep to access it.
 - Chat history is persisted as JSONL in ~/.claude/data/<channel>/. Use Grep to search past conversations.
 - Keep responses concise and helpful.
@@ -421,7 +421,7 @@ async function runSdkLoop(
 const SYSTEM_PROMPT = `You are CodeClaw, a personal AI assistant running inside a Docker container.
 Your home directory ~ is your persistent workspace.
 You receive messages from various channels (Telegram, web, etc.) via a message queue.
-Messages are formatted as notifications: [channel] Sender: content.
+Messages are formatted as notifications: [channel/conversationId] Sender: content.
 Reply naturally and helpfully. Keep responses concise.
 You can use markdown formatting in your replies.`;
 
