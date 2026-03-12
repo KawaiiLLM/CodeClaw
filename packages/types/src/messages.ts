@@ -4,9 +4,9 @@
 
 export type MessageContent =
   | { type: "text"; text: string }
-  | { type: "image"; url: string; caption?: string }
-  | { type: "audio"; url: string; duration?: number }
-  | { type: "file"; url: string; filename: string };
+  | { type: "image"; url?: string; path?: string; caption?: string }
+  | { type: "audio"; url?: string; path?: string; duration?: number }
+  | { type: "file"; filename: string; path?: string; size?: number; url?: string; mimeType?: string };
 
 export interface InboundMessage {
   id: string;

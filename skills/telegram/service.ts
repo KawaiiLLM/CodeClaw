@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { Bot } from "grammy";
@@ -19,7 +20,9 @@ interface TelegramConfig {
   allowed_users?: string[];
 }
 
-const CONFIG_PATH = process.env.CONFIG_PATH ?? "/workspace/config/telegram.json";
+const HOME = process.env.HOME ?? "/home/codeclaw";
+const CONFIG_PATH = process.env.CONFIG_PATH ?? `${HOME}/.claude/config/telegram.json`;
+const DATA_DIR = `${HOME}/.claude/data/telegram`;
 const KERNEL_URL = process.env.KERNEL_URL ?? "http://host.docker.internal:19000";
 const SERVICE_PORT = parseInt(process.env.SERVICE_PORT ?? "7001", 10);
 const SKILL_ID = process.env.SKILL_ID ?? "telegram";
@@ -82,6 +85,28 @@ async function main() {
   }
   console.log("[telegram] Registered with kernel I/O Bridge");
 
+  // --- JSONL persistence helpers ---
+
+  function ensureDir(dir: string): void {
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  }
+
+  function appendToLog(chatId: string, record: Record<string, unknown>): void {
+    ensureDir(DATA_DIR);
+    const logPath = join(DATA_DIR, `${chatId}.jsonl`);
+    appendFileSync(logPath, JSON.stringify(record) + "\n");
+  }
+
+  function saveFile(chatId: string, msgId: string, filename: string, buf: Buffer): { absPath: string; relPath: string } {
+    const filesDir = join(DATA_DIR, chatId, "files");
+    ensureDir(filesDir);
+    const safeName = `${msgId}_${filename}`;
+    const absPath = join(filesDir, safeName);
+    writeFileSync(absPath, buf);
+    const relPath = `files/${safeName}`;
+    return { absPath, relPath };
+  }
+
   // --- Helpers ---
 
   const botUsername = bot.botInfo.username ?? "";
@@ -92,14 +117,11 @@ async function main() {
     return config.allowed_users.includes(String(userId));
   }
 
-  /** In group chats, only respond when @mentioned or replied to. */
-  function isRelevantInGroup(ctx: { chat: { type: string }; message?: { text?: string; caption?: string; reply_to_message?: { from?: { id: number } } } }): boolean {
-    if (ctx.chat.type === "private") return true;
+  /** Check if message directly addresses the bot (@mention or reply-to-bot). */
+  function isDirectlyAddressed(ctx: { message?: { text?: string; caption?: string; reply_to_message?: { from?: { id: number } } } }): boolean {
     const msg = ctx.message;
     if (!msg) return false;
-    // Replied to the bot
     if (msg.reply_to_message?.from?.id === bot.botInfo?.id) return true;
-    // @mentioned in text or caption
     const text = msg.text ?? msg.caption ?? "";
     if (botUsername && text.includes(`@${botUsername}`)) return true;
     return false;
@@ -141,95 +163,258 @@ async function main() {
     });
   }
 
-  // --- Receive Telegram messages → forward to kernel ---
+  /** Download a Telegram file and return its content as a Buffer. */
+  async function downloadTelegramFile(fileId: string): Promise<{ buf: Buffer; filePath: string }> {
+    const file = await bot.api.getFile(fileId);
+    const url = `https://api.telegram.org/file/bot${config.bot_token}/${file.file_path}`;
+    const fetchOpts: Record<string, unknown> = {};
+    if (proxyAgent) fetchOpts.dispatcher = proxyAgent;
+    const res = await undiciFetch(url, fetchOpts as any);
+    if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}`);
+    return { buf: Buffer.from(await res.arrayBuffer()), filePath: file.file_path! };
+  }
 
-  bot.on("message:text", async (ctx) => {
-    if (!isUserAllowed(ctx.from.id)) return;
-    if (!isRelevantInGroup(ctx)) return;
+  // --- Active Window: per-group buffering + 3-min conversation window ---
 
-    // Strip @botUsername from text before forwarding
-    let text = ctx.message.text;
-    if (botUsername) {
-      text = text.replace(new RegExp(`@${botUsername}\\b`, "g"), "").trim();
+  const ACTIVE_WINDOW_MS = 3 * 60 * 1000;
+  const BUFFER_CAPACITY = 50;
+
+  interface BufferedMessage {
+    sender: string;
+    text: string;
+    timestamp: number;
+    forwarded: boolean;
+  }
+
+  class RingBuffer<T> {
+    private items: T[] = [];
+    constructor(private capacity: number) {}
+    push(item: T): void {
+      if (this.items.length >= this.capacity) this.items.shift();
+      this.items.push(item);
     }
-    const replyContext = getReplyContext(ctx.message);
-    text = replyContext + (text || "(mentioned you)");
+    getAll(): T[] { return [...this.items]; }
+  }
 
-    // If replying to a photo or sticker, forward as image so the agent can see it
-    const reply = ctx.message.reply_to_message;
-    const replyImageFileId = reply?.photo?.length
-      ? reply.photo[reply.photo.length - 1].file_id
-      : reply?.sticker?.file_id ?? null;
-    if (replyImageFileId) {
-      try {
-        const file = await ctx.api.getFile(replyImageFileId);
+  interface GroupState {
+    buffer: RingBuffer<BufferedMessage>;
+    activeUntil: number;
+  }
+
+  const groupStates = new Map<string, GroupState>();
+
+  function getGroupState(chatId: string): GroupState {
+    let state = groupStates.get(chatId);
+    if (!state) {
+      state = { buffer: new RingBuffer(BUFFER_CAPACITY), activeUntil: 0 };
+      groupStates.set(chatId, state);
+    }
+    return state;
+  }
+
+  function formatTime(ts: number): string {
+    const d = new Date(ts);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  }
+
+  function buildContextPrefix(messages: BufferedMessage[]): string {
+    if (messages.length === 0) return "";
+    const lines = messages.map(m => `[${formatTime(m.timestamp)}] ${m.sender}: ${m.text}`);
+    return `[Recent group messages (${messages.length} unread)]:\n${lines.join("\n")}\n\n---\n`;
+  }
+
+  // --- Unified message handler ---
+
+  bot.on("message", async (ctx) => {
+    if (!ctx.from || !isUserAllowed(ctx.from.id)) return;
+
+    const msg = ctx.message;
+    const isGroup = ctx.chat.type !== "private";
+    const senderName = ctx.from.first_name + (ctx.from.last_name ? ` ${ctx.from.last_name}` : "");
+
+    // Extract summary for ring buffer
+    const summary = msg.text
+      ?? msg.caption
+      ?? (msg.photo ? "[Photo]" : null)
+      ?? (msg.document ? `[File: ${msg.document.file_name ?? "unknown"}]` : null)
+      ?? (msg.sticker ? `[Sticker${msg.sticker.emoji ? ` ${msg.sticker.emoji}` : ""}]` : null)
+      ?? "[Other]";
+
+    // --- Group: buffer + active window logic ---
+    let contextPrefix = "";
+    if (isGroup) {
+      const chatId = String(ctx.chat.id);
+      const state = getGroupState(chatId);
+
+      // Always buffer
+      state.buffer.push({
+        sender: senderName,
+        text: summary,
+        timestamp: msg.date * 1000,
+        forwarded: false,
+      });
+
+      const addressed = isDirectlyAddressed(ctx);
+      const inWindow = Date.now() < state.activeUntil;
+
+      if (!addressed && !inWindow) return; // Silent buffer
+
+      // Activate or extend window
+      const wasInWindow = inWindow;
+      state.activeUntil = Date.now() + ACTIVE_WINDOW_MS;
+
+      if (addressed) {
+        const unforwarded = state.buffer.getAll().filter(m => !m.forwarded);
+        if (unforwarded.length > 0) unforwarded.pop(); // Exclude current message
+        contextPrefix = buildContextPrefix(unforwarded);
+        console.log(`[telegram] Group ${chatId}: window ${wasInWindow ? "extended" : "started"}, context: ${unforwarded.length} msgs`);
+      } else {
+        contextPrefix = "[Active window message — reply only if relevant]\n";
+        console.log(`[telegram] Group ${chatId}: forwarding in active window`);
+      }
+
+      // Mark all buffered as forwarded
+      for (const m of state.buffer.getAll()) {
+        m.forwarded = true;
+      }
+    }
+
+    // --- Forward based on message type ---
+    const sender = makeSender(ctx.from);
+    const conversation = makeConversation(ctx.chat);
+    const baseId = `tg-${ctx.chat.id}-${msg.message_id}`;
+    const timestamp = msg.date * 1000;
+
+    try {
+      if (msg.text != null) {
+        // --- Text message ---
+        let text = msg.text;
+        if (botUsername) {
+          text = text.replace(new RegExp(`@${botUsername}\\b`, "g"), "").trim();
+        }
+        const replyContext = getReplyContext(msg);
+        text = contextPrefix + replyContext + (text || "(mentioned you)");
+
+        // Check if replying to a photo/sticker
+        const reply = msg.reply_to_message;
+        const replyImageFileId = reply?.photo?.length
+          ? reply.photo[reply.photo.length - 1].file_id
+          : reply?.sticker?.file_id ?? null;
+        if (replyImageFileId) {
+          try {
+            const file = await ctx.api.getFile(replyImageFileId);
+            const url = `https://api.telegram.org/file/bot${config.bot_token}/${file.file_path}`;
+            await forwardToKernel({
+              id: baseId, channel: "telegram", sender, conversation,
+              content: { type: "image" as const, url, caption: text },
+              timestamp,
+            });
+            console.log(`[telegram] Forwarded text+reply-image from ${senderName}`);
+            return;
+          } catch (err) {
+            console.error("[telegram] Failed to get reply image, falling back to text:", err);
+          }
+        }
+
+        await forwardToKernel({
+          id: baseId, channel: "telegram", sender, conversation,
+          content: { type: "text" as const, text },
+          timestamp,
+        });
+        appendToLog(String(ctx.chat.id), {
+          id: baseId, ts: timestamp,
+          sender: { id: sender.id, name: sender.name },
+          type: "text", text: msg.text,
+          replyTo: msg.reply_to_message ? `tg_${ctx.chat.id}_${msg.reply_to_message.message_id}` : null,
+        });
+        console.log(`[telegram] Forwarded text from ${senderName}`);
+
+      } else if (msg.photo) {
+        // --- Photo message ---
+        const photos = msg.photo;
+        const largest = photos[photos.length - 1];
+        const file = await ctx.api.getFile(largest.file_id);
         const url = `https://api.telegram.org/file/bot${config.bot_token}/${file.file_path}`;
-        const payload = {
-          id: `tg-${ctx.chat.id}-${ctx.message.message_id}`,
-          channel: "telegram",
-          sender: makeSender(ctx.from),
-          conversation: makeConversation(ctx.chat),
-          content: { type: "image" as const, url, caption: text },
-          timestamp: ctx.message.date * 1000,
-        };
-        await forwardToKernel(payload);
-        console.log(`[telegram] Forwarded text+reply-image from ${ctx.from.first_name} to kernel`);
-        return;
-      } catch (err) {
-        console.error("[telegram] Failed to get reply image, falling back to text:", err);
+        const replyContext = getReplyContext(msg);
+        let caption = msg.caption ?? "";
+        if (botUsername) {
+          caption = caption.replace(new RegExp(`@${botUsername}\\b`, "g"), "").trim();
+        }
+        caption = contextPrefix + replyContext + (caption || "[Sent an image]");
+
+        await forwardToKernel({
+          id: baseId, channel: "telegram", sender, conversation,
+          content: { type: "image" as const, url, caption },
+          timestamp,
+        });
+        // Save photo to disk + JSONL (best effort)
+        try {
+          const { buf } = await downloadTelegramFile(largest.file_id);
+          const ext = file.file_path?.split(".").pop() ?? "jpg";
+          const { relPath } = saveFile(String(ctx.chat.id), baseId, `photo.${ext}`, buf);
+          appendToLog(String(ctx.chat.id), {
+            id: baseId, ts: timestamp,
+            sender: { id: sender.id, name: sender.name },
+            type: "image", path: relPath,
+            caption: (msg.caption ?? "").replace(new RegExp(`@${botUsername}\\b`, "g"), "").trim() || null,
+            replyTo: msg.reply_to_message ? `tg_${ctx.chat.id}_${msg.reply_to_message.message_id}` : null,
+          });
+        } catch { /* best effort logging */ }
+        console.log(`[telegram] Forwarded photo from ${senderName}`);
+
+      } else if (msg.document) {
+        // --- Document/file message: download and forward as file type ---
+        const doc = msg.document;
+        const fileName = doc.file_name ?? "unknown";
+        const replyContext = getReplyContext(msg);
+        let caption = msg.caption ?? "";
+        if (botUsername) {
+          caption = caption.replace(new RegExp(`@${botUsername}\\b`, "g"), "").trim();
+        }
+        const textPart = contextPrefix + replyContext + caption;
+
+        try {
+          const { buf } = await downloadTelegramFile(doc.file_id);
+          const { absPath, relPath } = saveFile(String(ctx.chat.id), baseId, fileName, buf);
+
+          appendToLog(String(ctx.chat.id), {
+            id: baseId, ts: timestamp,
+            sender: { id: sender.id, name: sender.name },
+            type: "file", filename: fileName, path: relPath,
+            size: buf.length, mimeType: doc.mime_type ?? null,
+            caption: caption || null,
+            replyTo: msg.reply_to_message ? `tg_${ctx.chat.id}_${msg.reply_to_message.message_id}` : null,
+          });
+
+          await forwardToKernel({
+            id: baseId, channel: "telegram", sender, conversation,
+            content: {
+              type: "file" as const,
+              filename: fileName,
+              path: absPath,
+              size: buf.length,
+              mimeType: doc.mime_type ?? undefined,
+            },
+            timestamp,
+            ...(textPart.trim() ? { caption: textPart.trim() } : {}),
+          });
+          console.log(`[telegram] Saved file "${fileName}" (${buf.length}B) to ${absPath}`);
+        } catch (err) {
+          console.error(`[telegram] Failed to download file "${fileName}":`, err);
+          // Fallback: send text notification without file data
+          await forwardToKernel({
+            id: baseId, channel: "telegram", sender, conversation,
+            content: { type: "text" as const, text: textPart + `[File: ${fileName} — download failed]` },
+            timestamp,
+          });
+        }
+
+      } else if (isGroup) {
+        // Sticker, audio, etc. — buffered for context but not forwarded to agent
+        console.log(`[telegram] Buffered ${msg.sticker ? "sticker" : "media"} from ${senderName} (context only)`);
       }
-    }
-
-    const payload = {
-      id: `tg-${ctx.chat.id}-${ctx.message.message_id}`,
-      channel: "telegram",
-      sender: makeSender(ctx.from),
-      conversation: makeConversation(ctx.chat),
-      content: { type: "text" as const, text },
-      timestamp: ctx.message.date * 1000,
-    };
-
-    try {
-      await forwardToKernel(payload);
-      console.log(`[telegram] Forwarded text from ${ctx.from.first_name} to kernel`);
     } catch (err) {
-      console.error("[telegram] Failed to forward message to kernel:", err);
-    }
-  });
-
-  // --- Photo messages → download URL + forward as image ---
-
-  bot.on("message:photo", async (ctx) => {
-    if (!isUserAllowed(ctx.from.id)) return;
-    if (!isRelevantInGroup(ctx)) return;
-
-    try {
-      // Pick the largest photo (last in the array)
-      const photos = ctx.message.photo;
-      const largest = photos[photos.length - 1];
-      const file = await ctx.api.getFile(largest.file_id);
-      const url = `https://api.telegram.org/file/bot${config.bot_token}/${file.file_path}`;
-
-      const replyContext = getReplyContext(ctx.message);
-      let caption = ctx.message.caption ?? "";
-      if (botUsername) {
-        caption = caption.replace(new RegExp(`@${botUsername}\\b`, "g"), "").trim();
-      }
-      caption = replyContext + (caption || "[Sent an image]");
-
-      const payload = {
-        id: `tg-${ctx.chat.id}-${ctx.message.message_id}`,
-        channel: "telegram",
-        sender: makeSender(ctx.from),
-        conversation: makeConversation(ctx.chat),
-        content: { type: "image" as const, url, caption },
-        timestamp: ctx.message.date * 1000,
-      };
-
-      await forwardToKernel(payload);
-      console.log(`[telegram] Forwarded photo from ${ctx.from.first_name} to kernel`);
-    } catch (err) {
-      console.error("[telegram] Failed to forward photo to kernel:", err);
+      console.error("[telegram] Failed to process message:", err);
     }
   });
 
@@ -256,6 +441,15 @@ async function main() {
 
           await bot.api.sendMessage(conversation, content.text, {
             ...(replyMsgId ? { reply_parameters: { message_id: replyMsgId } } : {}),
+          });
+
+          // Log outbound message to JSONL
+          appendToLog(conversation, {
+            id: `tg_${conversation}_out_${Date.now()}`,
+            ts: Date.now(),
+            sender: { id: "bot", name: "Agent" },
+            type: "text", text: content.text,
+            replyTo: replyTo ?? null,
           });
         }
 

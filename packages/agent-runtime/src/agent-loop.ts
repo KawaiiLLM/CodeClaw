@@ -71,35 +71,63 @@ async function downloadImageAsBase64(
   }
 }
 
+const PREVIEW_LIMIT = 200; // Short text threshold (characters)
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
 /**
- * Format an inbound message for the agent. Returns a string for text-only,
- * or a content block array for multimodal (e.g. image) messages.
+ * Format an inbound message as a phone-notification-style summary.
+ * Short text shown in full; long text/files show preview + path for Read/Grep.
  */
 async function formatMessageForAgent(msg: InboundMessage): Promise<MessageParam["content"]> {
-  const source = `[${msg.channel}/${msg.conversation.id}]`;
+  const tag = `[${msg.channel}]`;
   const sender = msg.sender.name;
+  const replyTag = msg.replyTo ? ` (replying to ${msg.replyTo})` : "";
 
   if (msg.content.type === "text") {
-    return `${source} ${sender}: ${msg.content.text}`;
+    const text = msg.content.text;
+    if (text.length <= PREVIEW_LIMIT) {
+      return `${tag} ${sender}${replyTag}: ${text}`;
+    }
+    const preview = text.slice(0, 100) + "...";
+    const dataDir = `~/.claude/data/${msg.channel}`;
+    return `${tag} ${sender}${replyTag}: ${preview}\n  → full text in ${dataDir}/${msg.conversation.id}.jsonl (id: ${msg.id})`;
   }
+
   if (msg.content.type === "image") {
-    const imageSource = await downloadImageAsBase64(msg.content.url);
-    const blocks: Anthropic.ContentBlockParam[] = [
-      { type: "image", source: imageSource as any },
-    ];
-    const caption = msg.content.caption
-      ? `${source} ${sender}: ${msg.content.caption}`
-      : `${source} ${sender}: [Sent an image]`;
-    blocks.push({ type: "text", text: caption });
-    return blocks;
+    const caption = msg.content.caption || "[image]";
+    if (msg.content.url) {
+      const imageSource = await downloadImageAsBase64(msg.content.url);
+      const blocks: Anthropic.ContentBlockParam[] = [
+        { type: "image", source: imageSource as any },
+      ];
+      const textLine = msg.content.path
+        ? `${tag} ${sender}${replyTag}: ${caption}\n  → ${msg.content.path}`
+        : `${tag} ${sender}${replyTag}: ${caption}`;
+      blocks.push({ type: "text", text: textLine });
+      return blocks;
+    }
+    return `${tag} ${sender}${replyTag}: ${caption}`;
   }
+
   if (msg.content.type === "audio") {
-    return `${source} ${sender}: [Audio ${msg.content.duration ?? "?"}s] ${msg.content.url}`;
+    const dur = msg.content.duration ? ` ${msg.content.duration}s` : "";
+    const pathRef = msg.content.path ? `\n  → ${msg.content.path}` : "";
+    return `${tag} ${sender}${replyTag}: [audio${dur}]${pathRef}`;
   }
+
   if (msg.content.type === "file") {
-    return `${source} ${sender}: [File] ${msg.content.filename} ${msg.content.url}`;
+    const name = msg.content.filename;
+    const size = msg.content.size ? ` (${formatSize(msg.content.size)})` : "";
+    const pathRef = msg.content.path ? `\n  → ${msg.content.path}` : "";
+    return `${tag} ${sender}${replyTag}: [file] ${name}${size}${pathRef}`;
   }
-  return `${source} ${sender}: [Unknown content type]`;
+
+  return `${tag} ${sender}${replyTag}: [unknown content]`;
 }
 
 // --- Agent modes ---
@@ -123,14 +151,31 @@ function detectMode(): AgentMode {
 // --- SDK mode: full Claude Code agent via Agent SDK ---
 
 const SDK_SYSTEM_APPEND = `You are CodeClaw, a personal AI agent running inside a Docker container.
+Your home directory is ~ (/home/codeclaw). This is your persistent workspace.
+
 You receive messages from various channels (Telegram, web, etc.) via a message queue.
-Each message is prefixed with [channel/conversationId] sender: content.
+Messages are formatted as notifications: [channel] Sender: content preview.
 
 IMPORTANT RULES:
 - Use the send_message MCP tool to reply to users on their channel.
-- When replying, extract the channel and conversation ID from the message prefix.
-- You have full file system access in /workspace.
-- Keep responses concise and helpful.`;
+- When replying, use the channel name from the [channel] tag and the conversation ID from the message metadata.
+- For long messages or files, the full content path is shown after "→". Use Read or Grep to access it.
+- Chat history is persisted as JSONL in ~/.claude/data/<channel>/. Use Grep to search past conversations.
+- Keep responses concise and helpful.
+
+DIRECTORY STRUCTURE:
+- ~/.claude/skills/     — Installed skills (each has SKILL.md)
+- ~/.claude/data/       — Skill persistent data (chat logs, files)
+- ~/.claude/cache/      — Temporary files (safe to clean)
+- ~/.claude/memory/     — Your long-term memory
+- ~/.claude/config/     — Configuration files
+- ~/Projects/           — Create project directories here as needed
+
+GROUP CHAT BEHAVIOR:
+- Messages prefixed with "[Recent group messages ... unread]" include context from before you were @mentioned.
+- Messages marked "[Active window message — reply only if relevant]" are from an ongoing group conversation.
+  You are NOT required to reply to every active window message. Only reply when you have something useful to add.
+  Use the skip_reply MCP tool to acknowledge a message without sending a reply.`;
 
 /**
  * Bridges MessageInjector → AsyncIterable<SDKUserMessage> for the SDK query() stream input.
@@ -264,7 +309,7 @@ async function runSdkLoop(
       },
       settingSources: ["project"],
       model,
-      cwd: workspacePath,
+      cwd: process.env.HOME ?? workspacePath,
       env,
       mcpServers: {
         codeclaw: mcpServer,
@@ -374,8 +419,9 @@ async function runSdkLoop(
 // --- Chat mode: real Claude API via Anthropic SDK ---
 
 const SYSTEM_PROMPT = `You are CodeClaw, a personal AI assistant running inside a Docker container.
+Your home directory ~ is your persistent workspace.
 You receive messages from various channels (Telegram, web, etc.) via a message queue.
-Each message is prefixed with [channel/conversationId] sender: content.
+Messages are formatted as notifications: [channel] Sender: content.
 Reply naturally and helpfully. Keep responses concise.
 You can use markdown formatting in your replies.`;
 

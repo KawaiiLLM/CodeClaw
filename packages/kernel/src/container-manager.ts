@@ -77,11 +77,11 @@ export class ContainerManager {
       Image: config.image,
       Env: env,
       HostConfig: {
-        Binds: [`${config.workspaceVolume}:/workspace`],
+        Binds: [`${config.workspaceVolume}:/home/codeclaw`],
         NetworkMode: config.networkMode ?? "host",
         RestartPolicy: { Name: "unless-stopped" },
       },
-      WorkingDir: "/workspace",
+      WorkingDir: "/home/codeclaw",
     });
 
     this.containers.set(agentId, container.id);

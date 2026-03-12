@@ -25,13 +25,15 @@ COPY packages/agent-runtime/ packages/agent-runtime/
 # Install pnpm and dependencies
 RUN npm install -g pnpm && pnpm config set registry https://registry.npmmirror.com && pnpm install --no-frozen-lockfile
 
-# Create non-root user (Claude Code SDK refuses bypassPermissions as root)
-RUN useradd -m -s /bin/bash codeclaw && \
-    mkdir -p /workspace && chown codeclaw:codeclaw /workspace
+# Create non-root user with explicit UID (Claude Code SDK refuses bypassPermissions as root)
+RUN userdel -r node && \
+    useradd -u 1000 -m -s /bin/bash codeclaw && \
+    mkdir -p /home/codeclaw/.claude/skills /home/codeclaw/.claude/data /home/codeclaw/.claude/cache /home/codeclaw/.claude/memory /home/codeclaw/.claude/config && \
+    chown -R codeclaw:codeclaw /home/codeclaw
 
-# Workspace is mounted as a volume
-VOLUME /workspace
-WORKDIR /workspace
+# Home directory is mounted as a volume for persistence
+VOLUME /home/codeclaw
+WORKDIR /home/codeclaw
 
 USER codeclaw
 

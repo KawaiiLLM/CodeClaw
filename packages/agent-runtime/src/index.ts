@@ -7,7 +7,7 @@ import { logger } from "./logger.js";
 async function main() {
   const agentId = process.env.AGENT_ID ?? "andy";
   const kernelUrl = process.env.KERNEL_URL ?? "http://localhost:19000";
-  const workspacePath = process.env.WORKSPACE_PATH ?? "/workspace";
+  const workspacePath = process.env.HOME ?? "/home/codeclaw";
   const resumeSessionId = process.env.RESUME_SESSION_ID;
 
   logger.info({ agentId, kernelUrl, workspacePath }, "CodeClaw Agent Runtime starting...");
