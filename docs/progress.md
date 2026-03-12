@@ -63,7 +63,7 @@ codeclaw/
 │   └── telegram/
 │       ├── service.ts              # grammy bot + 代理 transformer + kernel 注册
 │       ├── package.json            # grammy + undici
-│       ├── MANUAL.md               # Agent 可读安装指南
+│       ├── SKILL.md                # Agent 可读安装指南
 │       └── config.schema.json
 └── workspace-template/
     ├── CLAUDE.md                   # Agent 自我认知文件

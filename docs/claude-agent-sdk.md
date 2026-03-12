@@ -319,12 +319,22 @@ await q.toggleMcpServer("codeclaw", false);
 | `PostToolUseFailure` | 工具执行失败 | 否 |
 | `UserPromptSubmit` | 用户提示提交时 | 否 |
 | `Stop` | Agent 停止 | 否 |
-| `SubagentStart` | 子 agent 启动 | 否 |
-| `SubagentStop` | 子 agent 完成 | 否 |
+| `SubagentStart` | 子 Agent 启动 | 是（可注入上下文） |
+| `SubagentStop` | 子 Agent 完成 | 否（可读取结果） |
 | `PreCompact` | 上下文压缩前 | 否 |
 | `Notification` | 状态通知 | 否 |
 | `SessionStart` | 会话初始化 (TS only) | 否 |
 | `SessionEnd` | 会话结束 (TS only) | 否 |
+| `PermissionRequest` | 权限请求 | 否 |
+| `Setup` | SDK 初始化设置 | 否 |
+| `TeammateIdle` | 队友 Agent 空闲 | 否 |
+| `TaskCompleted` | 任务完成 | 否 |
+| `Elicitation` | 向用户请求输入 | 否 |
+| `ElicitationResult` | 用户输入结果 | 否 |
+| `ConfigChange` | 配置变更 | 否 |
+| `WorktreeCreate` | Git worktree 创建 | 否 |
+| `WorktreeRemove` | Git worktree 移除 | 否 |
+| `InstructionsLoaded` | CLAUDE.md 等指令加载 | 否 |
 
 ### 5.2 Hook 配置结构
 
@@ -501,7 +511,153 @@ q.close();
 
 ---
 
-## 八、消息类型速查
+## 八、子 Agent（Subagents）
+
+### 8.1 概念
+
+主 Agent 可以通过内置 `Agent` 工具 spawn 子 Agent。子 Agent 拥有独立的上下文窗口和工具集，完成任务后结果返回主 Agent。
+
+**约束**：子 Agent 嵌套限制为一层——子 Agent 不能再 spawn 子 Agent。但主 Agent 可以并行 spawn 多个子 Agent。
+
+### 8.2 自定义子 Agent（`options.agents`）
+
+通过 `agents` 选项注册自定义子 Agent，它们会出现在 `Agent` 工具的可选列表中：
+
+```typescript
+query({
+  prompt: stream,
+  options: {
+    agents: {
+      "test-runner": {
+        description: "Runs tests and reports results",
+        prompt: "You are a test runner. Run the specified tests and report pass/fail.",
+        tools: ["Read", "Grep", "Glob", "Bash"],
+        model: "sonnet",        // 子 Agent 用更便宜的模型
+        maxTurns: 10,           // 限制轮次防止失控
+      },
+      "code-reviewer": {
+        description: "Reviews code for best practices and potential bugs",
+        prompt: "You are a code reviewer...",
+        model: "inherit",       // 继承主 Agent 的模型
+        disallowedTools: ["Write", "Edit"],  // 只读，不能修改代码
+      },
+    },
+  },
+});
+```
+
+### 8.3 `AgentDefinition` 完整字段
+
+```typescript
+type AgentDefinition = {
+  description: string;             // 何时使用这个 Agent（自然语言）
+  prompt: string;                  // 系统提示
+  tools?: string[];                // 允许的工具（省略则继承父 Agent）
+  disallowedTools?: string[];      // 显式禁止的工具
+  model?: "sonnet" | "opus" | "haiku" | "inherit";  // 省略或 "inherit" 则用主模型
+  mcpServers?: AgentMcpServerSpec[];  // 子 Agent 专用 MCP 服务器
+  skills?: string[];               // 预加载的 skill 名称
+  maxTurns?: number;               // 最大轮次
+  criticalSystemReminder_EXPERIMENTAL?: string;  // 关键提醒（实验性）
+};
+```
+
+### 8.4 主线程指定 Agent（`options.agent`）
+
+让主线程也使用某个 Agent 的配置（system prompt + 工具限制 + 模型）：
+
+```typescript
+query({
+  prompt: "Review this PR",
+  options: {
+    agent: "code-reviewer",  // 使用 agents 中定义的 code-reviewer 配置
+    agents: {
+      "code-reviewer": { /* ... */ },
+    },
+  },
+});
+```
+
+### 8.5 运行时查询可用子 Agent
+
+```typescript
+const q = query({ prompt: stream, options });
+
+const agents: AgentInfo[] = await q.supportedAgents();
+// AgentInfo: { name: string; description: string; model?: string }
+
+for (const a of agents) {
+  console.log(`${a.name}: ${a.description} (model: ${a.model ?? "inherit"})`);
+}
+```
+
+### 8.6 子 Agent 生命周期 Hooks
+
+```typescript
+hooks: {
+  SubagentStart: [{
+    hooks: [async (input) => {
+      // input: { agent_id, agent_type, session_id, cwd, ... }
+      console.log(`子 Agent 启动: ${input.agent_type} (${input.agent_id})`);
+      return {
+        hookSpecificOutput: {
+          hookEventName: "SubagentStart",
+          additionalContext: "额外上下文注入到子 Agent",  // 可选
+        },
+      };
+    }],
+  }],
+  SubagentStop: [{
+    hooks: [async (input) => {
+      // input: { agent_id, agent_type, agent_transcript_path, last_assistant_message, ... }
+      console.log(`子 Agent 完成: ${input.agent_type}`);
+      console.log(`结果: ${input.last_assistant_message}`);
+      console.log(`完整记录: ${input.agent_transcript_path}`);
+      return {};
+    }],
+  }],
+}
+```
+
+### 8.7 Hook 中区分主线程和子 Agent
+
+所有 Hook 的 `BaseHookInput` 包含可选的 `agent_id` 和 `agent_type` 字段：
+
+```typescript
+const protectInSubagent: HookCallback = async (input) => {
+  if (input.agent_id) {
+    // 在子 Agent 中——可能需要更严格的限制
+    console.log(`子 Agent ${input.agent_type} 正在调用工具`);
+  }
+  return {};
+};
+```
+
+### 8.8 成本优化模式
+
+主 Agent 用 Opus 做策略决策，子 Agent 用 Sonnet 做具体执行：
+
+```typescript
+agents: {
+  "file-searcher": {
+    description: "Search files for patterns",
+    prompt: "Search the codebase and return matching files.",
+    tools: ["Read", "Grep", "Glob"],
+    model: "sonnet",     // 便宜
+    maxTurns: 5,         // 快速完成
+  },
+  "deep-analyzer": {
+    description: "Deep analysis of complex code",
+    prompt: "Analyze the given code in depth.",
+    model: "opus",       // 需要强推理
+    maxTurns: 20,
+  },
+}
+```
+
+---
+
+## 九、消息类型速查
 
 ```typescript
 for await (const msg of query({ prompt, options })) {
@@ -527,7 +683,7 @@ Result subtype 枚举：
 
 ---
 
-## 九、环境变量传递
+## 十、环境变量传递
 
 SDK 通过 `options.env` 传递环境变量，不支持自定义 `fetch`：
 
@@ -544,7 +700,7 @@ options: {
 
 ---
 
-## 十、参考链接
+## 十一、参考链接
 
 - [Agent SDK Overview](https://docs.anthropic.com/en/docs/claude-code/sdk)
 - [TypeScript SDK Reference](https://platform.claude.com/docs/en/agent-sdk/typescript)

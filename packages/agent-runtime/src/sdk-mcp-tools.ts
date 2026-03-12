@@ -116,10 +116,20 @@ export function createSdkMcpTools(
     },
   );
 
+  const skipReply = tool(
+    "skip_reply",
+    "Acknowledge a message without sending a reply. Use when you see a group message during an active window that doesn't need a response.",
+    {},
+    async () => {
+      sentViaToolInTurn = true;
+      return { content: [{ type: "text" as const, text: "Reply skipped" }] };
+    },
+  );
+
   const server = createSdkMcpServer({
     name: "codeclaw",
     version: "0.1.0",
-    tools: [sendMessage, getQueueStatus, startSkillService, stopSkillService, listSkillServices],
+    tools: [sendMessage, skipReply, getQueueStatus, startSkillService, stopSkillService, listSkillServices],
   });
 
   return {
