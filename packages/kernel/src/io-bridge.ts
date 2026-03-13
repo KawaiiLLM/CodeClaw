@@ -66,7 +66,23 @@ export class IOBridge {
       throw new Error(`No skill service registered for channel: ${msg.channel}`);
     }
 
-    // Choose endpoint: /edit if editMessageId present, otherwise /send
+    // Custom Skill endpoint: transparent pass-through
+    if (msg.skillEndpoint) {
+      const url = `${service.endpoint}${msg.skillEndpoint}`;
+      logger.debug({ channel: msg.channel, conversation: msg.conversation, endpoint: url }, "Routing to custom skill endpoint");
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation: msg.conversation, ...msg.payload }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Skill service ${service.skillId} returned ${res.status}: ${body}`);
+      }
+      return (await res.json()) as Record<string, unknown>;
+    }
+
+    // Standard message routing: /edit or /send
     const route = msg.editMessageId ? "/edit" : "/send";
     const url = `${service.endpoint}${route}`;
     logger.debug({ channel: msg.channel, conversation: msg.conversation, endpoint: url, route }, "Routing outbound message");

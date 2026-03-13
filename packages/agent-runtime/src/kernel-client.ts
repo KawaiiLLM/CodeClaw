@@ -45,6 +45,23 @@ export class KernelClient {
     await this.post("/api/services/unregister", { skillId });
   }
 
+  /** Route an outbound operation to a custom Skill endpoint via the kernel. */
+  async sendOutbound(msg: {
+    channel: string;
+    conversation: string;
+    skillEndpoint: string;
+    payload: Record<string, unknown>;
+  }): Promise<Record<string, unknown>> {
+    const res = await this.post("/api/messages/outbound", {
+      channel: msg.channel,
+      conversation: msg.conversation,
+      content: { type: "text", text: "" },
+      skillEndpoint: msg.skillEndpoint,
+      payload: msg.payload,
+    });
+    return res as Record<string, unknown>;
+  }
+
   /** Report agent health to the kernel. */
   async reportHealth(
     agentId: string,

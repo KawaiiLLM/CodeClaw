@@ -190,10 +190,247 @@ export function createSdkMcpTools(
     },
   );
 
+  const reactMessage = tool(
+    "react_message",
+    "Add or remove an emoji reaction on a message. Use to acknowledge messages, express emotions, or give quick feedback.",
+    {
+      channel: z.string().describe("Target channel (e.g. 'telegram')"),
+      conversation: z.string().describe("Conversation/chat ID"),
+      messageId: z.string().describe("Message ID (numeric)"),
+      emoji: z.string().describe("Emoji to react with. Must be supported by the target platform."),
+      remove: z.boolean().optional().describe("If true, removes the reaction"),
+    },
+    async ({ channel, conversation, messageId, emoji, remove }) => {
+      try {
+        const endpoint = skillServiceManager.getEndpoint(channel);
+        if (!endpoint) return { content: [{ type: "text" as const, text: `No skill for channel: ${channel}` }], isError: true };
+        const res = await fetch(`${endpoint}/react`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversation, messageId: Number(messageId), emoji, remove }),
+        });
+        if (!res.ok) return { content: [{ type: "text" as const, text: `Failed: ${await res.text()}` }], isError: true };
+        return { content: [{ type: "text" as const, text: `Reaction ${remove ? "removed" : "added"}: ${emoji}` }] };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `Failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    },
+  );
+
+  const editMessage = tool(
+    "edit_message",
+    "Edit a previously sent bot message.",
+    {
+      channel: z.string().describe("Target channel"),
+      conversation: z.string().describe("Conversation/chat ID"),
+      messageId: z.string().describe("Message ID to edit"),
+      text: z.string().describe("New text content"),
+    },
+    async ({ channel, conversation, messageId, text }) => {
+      try {
+        await kernelClient.sendMessage({ channel, conversation, content: { type: "text", text }, editMessageId: messageId });
+        return { content: [{ type: "text" as const, text: `Message ${messageId} edited` }] };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `Failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    },
+  );
+
+  const deleteMessage = tool(
+    "delete_message",
+    "Delete a message. Can delete bot's own messages, or others in groups where bot is admin.",
+    {
+      channel: z.string().describe("Target channel"),
+      conversation: z.string().describe("Conversation/chat ID"),
+      messageId: z.string().describe("Message ID to delete"),
+    },
+    async ({ channel, conversation, messageId }) => {
+      try {
+        const endpoint = skillServiceManager.getEndpoint(channel);
+        if (!endpoint) return { content: [{ type: "text" as const, text: `No skill for channel: ${channel}` }], isError: true };
+        const res = await fetch(`${endpoint}/delete`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversation, messageId: Number(messageId) }),
+        });
+        if (!res.ok) return { content: [{ type: "text" as const, text: `Failed: ${await res.text()}` }], isError: true };
+        return { content: [{ type: "text" as const, text: `Message ${messageId} deleted` }] };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `Failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    },
+  );
+
+  const sendSticker = tool(
+    "send_sticker",
+    "Send a sticker to a conversation. Use get_sticker_set first to browse available stickers.",
+    {
+      channel: z.string().describe("Target channel"),
+      conversation: z.string().describe("Conversation/chat ID"),
+      fileId: z.string().describe("Sticker file_id from get_sticker_set"),
+      replyTo: z.string().optional().describe("Message ID to reply to"),
+    },
+    async ({ channel, conversation, fileId, replyTo }) => {
+      try {
+        sentViaToolInTurn = true;
+        messageSentCallback?.();
+        await kernelClient.sendOutbound({
+          channel, conversation,
+          skillEndpoint: "/sticker",
+          payload: { conversation, fileId, replyTo: replyTo ? Number(replyTo) : undefined },
+        });
+        return { content: [{ type: "text" as const, text: "Sticker sent" }] };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `Failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    },
+  );
+
+  const getStickerSet = tool(
+    "get_sticker_set",
+    "Browse a sticker set with visual thumbnails. Returns paginated stickers (default 10). Use to see what stickers look like before sending one.",
+    {
+      channel: z.string().describe("Target channel"),
+      name: z.string().describe("Sticker set name (e.g. 'HotCherry')"),
+      offset: z.number().optional().describe("Start index (default 0)"),
+      limit: z.number().optional().describe("Number of stickers to return (default 10)"),
+    },
+    async ({ channel, name, offset, limit }) => {
+      try {
+        // Hook: auto-trigger choose_sticker action
+        const conv = getConversation?.();
+        if (conv) {
+          const ep = skillServiceManager.getEndpoint(conv.channel);
+          if (ep) {
+            fetch(`${ep}/action`, {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ conversation: conv.conversationId, action: "choose_sticker" }),
+            }).catch(() => {});
+          }
+        }
+
+        const endpoint = skillServiceManager.getEndpoint(channel);
+        if (!endpoint) return { content: [{ type: "text" as const, text: `No skill for channel: ${channel}` }], isError: true };
+
+        const res = await fetch(`${endpoint}/sticker_set`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, offset, limit }),
+        });
+        if (!res.ok) return { content: [{ type: "text" as const, text: `Failed: ${await res.text()}` }], isError: true };
+
+        const data = await res.json() as {
+          name: string; title: string; total: number; offset: number; count: number;
+          stickers: { index: number; fileId: string; emoji: string | null; thumbnail?: string; mimeType?: string; isAnimated: boolean; isVideo: boolean }[];
+        };
+
+        const blocks: any[] = [];
+        blocks.push({ type: "text" as const, text: `${data.title} (${data.name}) — showing ${data.offset + 1}-${data.offset + data.count} of ${data.total}` });
+
+        for (const s of data.stickers) {
+          if (s.thumbnail && s.mimeType) {
+            blocks.push({ type: "image" as const, data: s.thumbnail, mimeType: s.mimeType });
+          }
+          const label = `#${s.index} file_id=${s.fileId} emoji=${s.emoji ?? "none"}${s.isAnimated ? " [animated]" : ""}${s.isVideo ? " [video]" : ""}`;
+          blocks.push({ type: "text" as const, text: label });
+        }
+
+        if (data.offset + data.count < data.total) {
+          blocks.push({ type: "text" as const, text: `(${data.total - data.offset - data.count} more — use offset=${data.offset + data.count} to see next page)` });
+        }
+
+        return { content: blocks };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `Failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    },
+  );
+
+  const sendPoll = tool(
+    "send_poll",
+    "Create a poll in a conversation.",
+    {
+      channel: z.string().describe("Target channel"),
+      conversation: z.string().describe("Conversation/chat ID"),
+      question: z.string().describe("Poll question"),
+      options: z.array(z.string()).describe("Poll options (2-10 items)"),
+      isAnonymous: z.boolean().optional().describe("Anonymous voting (default true)"),
+      allowsMultiple: z.boolean().optional().describe("Allow multiple answers (default false)"),
+    },
+    async ({ channel, conversation, question, options, isAnonymous, allowsMultiple }) => {
+      try {
+        sentViaToolInTurn = true;
+        messageSentCallback?.();
+        const res = await kernelClient.sendOutbound({
+          channel, conversation,
+          skillEndpoint: "/poll",
+          payload: { conversation, question, options, isAnonymous, allowsMultiple },
+        });
+        const pollId = (res as any)?.pollId;
+        return { content: [{ type: "text" as const, text: `Poll created${pollId ? ` (id: ${pollId})` : ""}` }] };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `Failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    },
+  );
+
+  const getMessage = tool(
+    "get_message",
+    "Fetch a specific message from chat history. Returns full content including images. Use when you need to see a referenced message not in your current session (e.g. from a reply-to reference).",
+    {
+      channel: z.string().describe("Target channel"),
+      conversation: z.string().describe("Conversation/chat ID"),
+      date: z.string().describe("Date string (e.g. '2026-03-13')"),
+      seq: z.number().optional().describe("Message seq number within that day's file"),
+      platformMessageId: z.number().optional().describe("Platform-specific message ID (alternative to seq)"),
+    },
+    async ({ channel, conversation, date, seq, platformMessageId }) => {
+      try {
+        const endpoint = skillServiceManager.getEndpoint(channel);
+        if (!endpoint) return { content: [{ type: "text" as const, text: `No skill for channel: ${channel}` }], isError: true };
+
+        const res = await fetch(`${endpoint}/get_message`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversation, date, seq, messageId: platformMessageId }),
+        });
+        if (!res.ok) return { content: [{ type: "text" as const, text: `Not found: ${await res.text()}` }], isError: true };
+
+        const data = await res.json() as {
+          message: Record<string, unknown>;
+          attachments: { mimeType: string; data: string }[];
+        };
+
+        const blocks: any[] = [];
+        const msg = data.message;
+        const sender = (msg.sender as any)?.name ?? "Unknown";
+        blocks.push({ type: "text" as const, text: `[${date}/seq:${msg.seq}] ${sender} (${msg.type}):` });
+
+        if (msg.text) blocks.push({ type: "text" as const, text: String(msg.text) });
+        if (msg.caption) blocks.push({ type: "text" as const, text: String(msg.caption) });
+
+        for (const att of data.attachments) {
+          if (att.mimeType.startsWith("image/")) {
+            blocks.push({ type: "image" as const, data: att.data, mimeType: att.mimeType });
+          } else {
+            blocks.push({ type: "text" as const, text: `[attachment: ${att.mimeType}]` });
+          }
+        }
+
+        if (msg.emoji) blocks.push({ type: "text" as const, text: `emoji: ${msg.emoji}` });
+
+        return { content: blocks };
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `Failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    },
+  );
+
   const server = createSdkMcpServer({
     name: "codeclaw",
     version: "0.1.0",
-    tools: [sendMessage, skipReply, updateProgress, getQueueStatus, startSkillService, stopSkillService, listSkillServices],
+    tools: [
+      sendMessage, skipReply, updateProgress, getQueueStatus,
+      reactMessage, editMessage, deleteMessage,
+      sendSticker, getStickerSet, sendPoll, getMessage,
+      startSkillService, stopSkillService, listSkillServices,
+    ],
   });
 
   return {

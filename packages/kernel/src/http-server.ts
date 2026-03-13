@@ -39,8 +39,11 @@ export function createHttpServer(deps: ServerDeps) {
 
       "/api/messages/outbound": async (body) => {
         const msg = body as OutboundMessage;
-        if (!msg.channel || !msg.conversation || !msg.content) {
-          throw new HttpError(400, "Missing required fields: channel, conversation, content");
+        if (!msg.channel || !msg.conversation) {
+          throw new HttpError(400, "Missing required fields: channel, conversation");
+        }
+        if (!msg.skillEndpoint && !msg.content) {
+          throw new HttpError(400, "Missing required field: content (or skillEndpoint)");
         }
         try {
           return await ioBridge.routeOutbound(msg);
@@ -167,7 +170,7 @@ class HttpError extends Error {
   }
 }
 
-const MAX_BODY_BYTES = 1_048_576; // 1MB
+const MAX_BODY_BYTES = 10_485_760; // 10MB (base64 images can be large)
 
 function parseJsonBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {

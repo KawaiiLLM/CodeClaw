@@ -4,7 +4,7 @@
 
 export type MessageContent =
   | { type: "text"; text: string }
-  | { type: "image"; url?: string; path?: string; caption?: string }
+  | { type: "image"; url?: string; data?: string; mimeType?: string; path?: string; caption?: string }
   | { type: "audio"; url?: string; path?: string; duration?: number }
   | { type: "file"; filename: string; path?: string; size?: number; url?: string; mimeType?: string };
 
@@ -33,4 +33,8 @@ export interface OutboundMessage {
   replyTo?: string;
   editMessageId?: string;
   progress?: boolean;
+  /** Custom Skill endpoint for non-message outbound operations (e.g. "/sticker", "/poll"). */
+  skillEndpoint?: string;
+  /** Endpoint-specific payload. Sent to Skill when skillEndpoint is set. */
+  payload?: Record<string, unknown>;
 }
