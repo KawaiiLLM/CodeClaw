@@ -57,13 +57,14 @@ function getFilesDir(chatId: string, date?: string): string {
 
 const seqCounters = new Map<string, { date: string; seq: number }>();
 
-function nextSeq(chatId: string): number {
-  const today = todayStr();
-  const entry = seqCounters.get(chatId);
-  if (entry && entry.date === today) {
+function nextSeq(chatId: string, date?: string): number {
+  const targetDate = date ?? todayStr();
+  const key = `${chatId}:${targetDate}`;
+  const entry = seqCounters.get(key);
+  if (entry && entry.date === targetDate) {
     return ++entry.seq;
   }
-  const path = getJsonlPath(chatId, today);
+  const path = getJsonlPath(chatId, targetDate);
   let startSeq = 0;
   if (existsSync(path)) {
     const content = readFileSync(path, "utf-8").trimEnd();
@@ -73,13 +74,13 @@ function nextSeq(chatId: string): number {
       catch { startSeq = content.split("\n").length; }
     }
   }
-  seqCounters.set(chatId, { date: today, seq: startSeq });
+  seqCounters.set(key, { date: targetDate, seq: startSeq });
   return startSeq;
 }
 
-function appendToLog(chatId: string, record: Record<string, unknown>): number {
-  const seq = nextSeq(chatId);
-  const path = getJsonlPath(chatId);
+function appendToLog(chatId: string, record: Record<string, unknown>, date?: string): number {
+  const seq = nextSeq(chatId, date);
+  const path = getJsonlPath(chatId, date);
   appendFileSync(path, JSON.stringify({ seq, ...record }) + "\n");
   return seq;
 }
@@ -157,11 +158,13 @@ function ensureReplyPersisted(
   replyMsg: { message_id: number; date: number; from?: { id: number; first_name: string; last_name?: string }; text?: string; caption?: string; photo?: unknown[]; sticker?: { emoji?: string; set_name?: string; file_id: string }; document?: { file_name?: string; mime_type?: string }; voice?: unknown; audio?: unknown },
 ): string {
   const tgMsgId = replyMsg.message_id;
-  const today = todayStr();
+  // Use the original message's date, not today
+  const msgDate = new Date(replyMsg.date * 1000);
+  const dateStr = `${msgDate.getFullYear()}-${String(msgDate.getMonth() + 1).padStart(2, "0")}-${String(msgDate.getDate()).padStart(2, "0")}`;
 
   // Check in-memory index (populated lazily from JSONL on first access)
-  const knownIds = getPersistedSet(chatId, today);
-  if (knownIds.has(tgMsgId)) return `${today}/${chatId}/tgMsgId:${tgMsgId}`;
+  const knownIds = getPersistedSet(chatId, dateStr);
+  if (knownIds.has(tgMsgId)) return `${dateStr}/${chatId}/tgMsgId:${tgMsgId}`;
 
   // Not found — persist metadata
   const senderName = replyMsg.from
@@ -196,9 +199,9 @@ function ensureReplyPersisted(
     logRecord.type = "other";
   }
 
-  appendToLog(chatId, logRecord);
+  appendToLog(chatId, logRecord, dateStr);
   knownIds.add(tgMsgId);
-  return `${today}/${chatId}/tgMsgId:${tgMsgId}`;
+  return `${dateStr}/${chatId}/tgMsgId:${tgMsgId}`;
 }
 
 // --- 401 Circuit Breaker for sendChatAction ---
@@ -386,8 +389,8 @@ async function main() {
           const { buf } = await downloadTelegramFile(largest.file_id);
           const mimeType = detectImageType(buf);
           const ext = mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
-          saveFile(chatId, `${tgMsgId}_photo.${ext}`, buf);
-          seq = appendToLog(chatId, { ...logBase, type: "image", fileId: largest.file_id, caption: caption || null });
+          const { relPath } = saveFile(chatId, `${tgMsgId}_photo.${ext}`, buf);
+          seq = appendToLog(chatId, { ...logBase, type: "image", fileId: largest.file_id, path: relPath, caption: caption || null });
           const header = buildNotificationHeader(chatId, sender.name, seq, replyRef);
           kernelContent = { type: "image", data: buf.toString("base64"), mimeType, caption: `${header}${caption ? `\n${caption}` : ""}` };
         } catch (err) {
@@ -406,8 +409,8 @@ async function main() {
         try {
           const { buf } = await downloadTelegramFile(sticker.file_id);
           const ext = sticker.is_animated ? "tgs" : sticker.is_video ? "webm" : "webp";
-          saveFile(chatId, `${tgMsgId}_sticker.${ext}`, buf);
-          seq = appendToLog(chatId, { ...logBase, type: "sticker", fileId: sticker.file_id, emoji: sticker.emoji ?? null, setName: sticker.set_name ?? null });
+          const { relPath } = saveFile(chatId, `${tgMsgId}_sticker.${ext}`, buf);
+          seq = appendToLog(chatId, { ...logBase, type: "sticker", fileId: sticker.file_id, path: relPath, emoji: sticker.emoji ?? null, setName: sticker.set_name ?? null });
           const header = buildNotificationHeader(chatId, sender.name, seq, replyRef);
 
           if (isStatic) {
@@ -429,8 +432,8 @@ async function main() {
 
         try {
           const { buf } = await downloadTelegramFile(doc.file_id);
-          saveFile(chatId, `${tgMsgId}_${fileName}`, buf);
-          seq = appendToLog(chatId, { ...logBase, type: "file", filename: fileName, size: buf.length, mimeType: doc.mime_type ?? null, caption: caption || null });
+          const { relPath } = saveFile(chatId, `${tgMsgId}_${fileName}`, buf);
+          seq = appendToLog(chatId, { ...logBase, type: "file", filename: fileName, path: relPath, size: buf.length, mimeType: doc.mime_type ?? null, caption: caption || null });
           const header = buildNotificationHeader(chatId, sender.name, seq, replyRef);
           kernelContent = { type: "text", text: `${header}\n[文件: ${fileName}, ${formatSize(buf.length)}${caption ? `, "${caption}"` : ""}]` };
         } catch {
@@ -446,8 +449,8 @@ async function main() {
         try {
           const { buf } = await downloadTelegramFile(audio.file_id);
           const ext = msg.voice ? "ogg" : "mp3";
-          saveFile(chatId, `${tgMsgId}_audio.${ext}`, buf);
-          seq = appendToLog(chatId, { ...logBase, type: "audio", duration: audio.duration ?? null });
+          const { relPath } = saveFile(chatId, `${tgMsgId}_audio.${ext}`, buf);
+          seq = appendToLog(chatId, { ...logBase, type: "audio", path: relPath, duration: audio.duration ?? null });
         } catch {
           seq = appendToLog(chatId, { ...logBase, type: "audio", duration: audio.duration ?? null });
         }
@@ -533,7 +536,7 @@ async function main() {
           return;
         }
 
-        sendJson(res, 200, { success: true });
+        sendJson(res, 400, { error: `Unsupported content type: ${content.type}` });
       } catch (err) {
         console.error("[telegram] Failed to send outbound message:", err);
         sendJson(res, 500, { error: String(err) });
@@ -555,17 +558,21 @@ async function main() {
       }
 
     } else if (req.method === "POST" && req.url === "/action") {
-      const body = await parseBody(req);
-      const { conversation, action } = body as { conversation: string; action: string };
-      if (!chatActionBreaker.shouldSkip()) {
-        try {
-          await bot.api.sendChatAction(conversation, action as any);
-          chatActionBreaker.recordSuccess();
-        } catch (err) {
-          chatActionBreaker.recordError(err);
+      try {
+        const body = await parseBody(req);
+        const { conversation, action } = body as { conversation: string; action: string };
+        if (!chatActionBreaker.shouldSkip()) {
+          try {
+            await bot.api.sendChatAction(conversation, action as any);
+            chatActionBreaker.recordSuccess();
+          } catch (err) {
+            chatActionBreaker.recordError(err);
+          }
         }
+        sendJson(res, 200, { success: true });
+      } catch (err) {
+        sendJson(res, 400, { error: String(err) });
       }
-      sendJson(res, 200, { success: true });
 
     } else if (req.method === "POST" && req.url === "/react") {
       try {
@@ -678,6 +685,10 @@ async function main() {
         const { conversation, date, seq, messageId } = body as {
           conversation: string; date: string; seq?: number; messageId?: number;
         };
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^-?\d+$/.test(conversation)) {
+          sendJson(res, 400, { error: "Invalid date or conversation format" });
+          return;
+        }
         const filePath = join(DATA_BASE, date, `${conversation}.jsonl`);
         if (!existsSync(filePath)) {
           sendJson(res, 404, { error: "JSONL file not found" });
@@ -706,6 +717,10 @@ async function main() {
         // Package saved files as base64 attachments
         const attachments: { mimeType: string; data: string }[] = [];
         if (record.path && typeof record.path === "string") {
+          if ((record.path as string).includes("..")) {
+            sendJson(res, 400, { error: "Invalid path in record" });
+            return;
+          }
           const absPath = join(DATA_BASE, date, record.path as string);
           if (existsSync(absPath)) {
             const buf = readFileSync(absPath);

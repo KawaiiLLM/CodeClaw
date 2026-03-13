@@ -202,13 +202,11 @@ export function createSdkMcpTools(
     },
     async ({ channel, conversation, messageId, emoji, remove }) => {
       try {
-        const endpoint = skillServiceManager.getEndpoint(channel);
-        if (!endpoint) return { content: [{ type: "text" as const, text: `No skill for channel: ${channel}` }], isError: true };
-        const res = await fetch(`${endpoint}/react`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ conversation, messageId: Number(messageId), emoji, remove }),
+        await kernelClient.sendOutbound({
+          channel, conversation,
+          skillEndpoint: "/react",
+          payload: { conversation, messageId: Number(messageId), emoji, remove },
         });
-        if (!res.ok) return { content: [{ type: "text" as const, text: `Failed: ${await res.text()}` }], isError: true };
         return { content: [{ type: "text" as const, text: `Reaction ${remove ? "removed" : "added"}: ${emoji}` }] };
       } catch (err) {
         return { content: [{ type: "text" as const, text: `Failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
@@ -245,13 +243,11 @@ export function createSdkMcpTools(
     },
     async ({ channel, conversation, messageId }) => {
       try {
-        const endpoint = skillServiceManager.getEndpoint(channel);
-        if (!endpoint) return { content: [{ type: "text" as const, text: `No skill for channel: ${channel}` }], isError: true };
-        const res = await fetch(`${endpoint}/delete`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ conversation, messageId: Number(messageId) }),
+        await kernelClient.sendOutbound({
+          channel, conversation,
+          skillEndpoint: "/delete",
+          payload: { conversation, messageId: Number(messageId) },
         });
-        if (!res.ok) return { content: [{ type: "text" as const, text: `Failed: ${await res.text()}` }], isError: true };
         return { content: [{ type: "text" as const, text: `Message ${messageId} deleted` }] };
       } catch (err) {
         return { content: [{ type: "text" as const, text: `Failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
@@ -307,16 +303,11 @@ export function createSdkMcpTools(
           }
         }
 
-        const endpoint = skillServiceManager.getEndpoint(channel);
-        if (!endpoint) return { content: [{ type: "text" as const, text: `No skill for channel: ${channel}` }], isError: true };
-
-        const res = await fetch(`${endpoint}/sticker_set`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name, offset, limit }),
-        });
-        if (!res.ok) return { content: [{ type: "text" as const, text: `Failed: ${await res.text()}` }], isError: true };
-
-        const data = await res.json() as {
+        const data = await kernelClient.sendOutbound({
+          channel, conversation: "",
+          skillEndpoint: "/sticker_set",
+          payload: { name, offset, limit },
+        }) as {
           name: string; title: string; total: number; offset: number; count: number;
           stickers: { index: number; fileId: string; emoji: string | null; thumbnail?: string; mimeType?: string; isAnimated: boolean; isVideo: boolean }[];
         };
@@ -383,19 +374,18 @@ export function createSdkMcpTools(
     },
     async ({ channel, conversation, date, seq, platformMessageId }) => {
       try {
-        const endpoint = skillServiceManager.getEndpoint(channel);
-        if (!endpoint) return { content: [{ type: "text" as const, text: `No skill for channel: ${channel}` }], isError: true };
-
-        const res = await fetch(`${endpoint}/get_message`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ conversation, date, seq, messageId: platformMessageId }),
-        });
-        if (!res.ok) return { content: [{ type: "text" as const, text: `Not found: ${await res.text()}` }], isError: true };
-
-        const data = await res.json() as {
+        const data = await kernelClient.sendOutbound({
+          channel, conversation,
+          skillEndpoint: "/get_message",
+          payload: { conversation, date, seq, messageId: platformMessageId },
+        }) as {
+          success?: boolean;
+          error?: string;
           message: Record<string, unknown>;
           attachments: { mimeType: string; data: string }[];
         };
+
+        if (data.error) return { content: [{ type: "text" as const, text: `Not found: ${data.error}` }], isError: true };
 
         const blocks: any[] = [];
         const msg = data.message;
