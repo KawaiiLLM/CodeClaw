@@ -7,6 +7,8 @@ interface RunningService {
   process: ChildProcess;
   command: string;
   args: string[];
+  extraEnv: Record<string, string>;
+  onRestart?: () => Promise<void>;
   startedAt: number;
   restartCount: number;
 }
@@ -20,24 +22,26 @@ export class SkillServiceManager {
   constructor(private kernelClient: KernelClient) {}
 
   /** Start a skill service as a subprocess. */
-  async start(opts: { skillId: string; command: string; args?: string[]; port?: number; env?: Record<string, string> }): Promise<void> {
+  async start(opts: { skillId: string; command: string; args?: string[]; port?: number; env?: Record<string, string>; onRestart?: () => Promise<void> }): Promise<void> {
     const { skillId, command, args = [] } = opts;
 
     if (this.services.has(skillId)) {
       throw new Error(`Skill service '${skillId}' is already running`);
     }
 
-    const env = {
+    const extraEnv: Record<string, string> = {
       ...opts.env,
       ...(opts.port ? { SERVICE_PORT: String(opts.port) } : {}),
     };
-    const child = this.spawnService(skillId, command, args, env);
+    const child = this.spawnService(skillId, command, args, extraEnv);
 
     this.services.set(skillId, {
       skillId,
       process: child,
       command,
       args,
+      extraEnv,
+      onRestart: opts.onRestart,
       startedAt: Date.now(),
       restartCount: 0,
     });
@@ -115,14 +119,13 @@ export class SkillServiceManager {
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
-        KERNEL_URL: process.env.KERNEL_URL ?? "http://host.docker.internal:19000",
         SKILL_ID: skillId,
         ...extraEnv,
       },
     });
 
     child.stdout?.on("data", (data: Buffer) => {
-      logger.info({ skillId }, data.toString().trim());
+      logger.debug({ skillId }, data.toString().trim());
     });
 
     child.stderr?.on("data", (data: Buffer) => {
@@ -157,12 +160,19 @@ export class SkillServiceManager {
     const delay = RESTART_DELAY_MS * (service.restartCount + 1);
     logger.info({ skillId, restartCount: service.restartCount + 1, delayMs: delay }, "Restarting skill service");
 
-    setTimeout(() => {
+    setTimeout(async () => {
       if (!this.services.has(skillId)) return; // Stopped during delay
-      const newChild = this.spawnService(skillId, service.command, service.args);
+      const newChild = this.spawnService(skillId, service.command, service.args, service.extraEnv);
       service.process = newChild;
       service.restartCount++;
       service.startedAt = Date.now();
+      if (service.onRestart) {
+        try {
+          await service.onRestart();
+        } catch (err) {
+          logger.warn({ skillId, err }, "onRestart callback failed");
+        }
+      }
     }, delay);
   }
 }

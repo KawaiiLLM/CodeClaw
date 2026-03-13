@@ -295,7 +295,7 @@ async function main() {
             appendToLog(String(ctx.chat.id), {
               id: baseId, ts: timestamp,
               sender: { id: sender.id, name: sender.name },
-              type: "text", text: msg.text,
+              type: "text-reply-image", text: msg.text,
               replyTo: msg.reply_to_message ? `tg_${ctx.chat.id}_${msg.reply_to_message.message_id}` : null,
             });
             console.log(`[telegram] Forwarded text+reply-image from ${senderName}`);

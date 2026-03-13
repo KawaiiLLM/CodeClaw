@@ -35,9 +35,14 @@ async function main() {
   const PORT_BASE = 7001;
   let nextPort = PORT_BASE;
 
+  const SKILL_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+
   if (existsSync(skillsDir)) {
-    for (const entry of readdirSync(skillsDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
+    const entries = readdirSync(skillsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const entry of entries) {
       const manifestPath = join(skillsDir, entry.name, "manifest.json");
       if (!existsSync(manifestPath)) continue;
 
@@ -48,10 +53,29 @@ async function main() {
           logger.warn({ manifestPath }, "Skipping manifest: missing skillId or entrypoint");
           continue;
         }
+        if (!SKILL_ID_RE.test(skillId)) {
+          logger.warn({ skillId, manifestPath }, "Skipping manifest: invalid skillId (must match /^[a-z0-9][a-z0-9-]*$/)");
+          continue;
+        }
+        if (!entrypoint.startsWith("/codeclaw/")) {
+          logger.warn({ entrypoint, manifestPath }, "Skipping manifest: entrypoint must be under /codeclaw/");
+          continue;
+        }
 
         const port = nextPort++;
         const configPath = join(configDir, `${skillId}.json`);
         const command = extname(entrypoint) === ".ts" ? "tsx" : "node";
+        const skillType = type ?? "channel";
+        const skillCapabilities = capabilities ?? [];
+
+        const registerWithKernel = async () => {
+          await kernelClient.registerSkillService({
+            skillId,
+            type: skillType,
+            capabilities: skillCapabilities,
+            endpoint: `http://localhost:${port}`,
+          });
+        };
 
         await skillServiceManager.start({
           skillId,
@@ -61,15 +85,11 @@ async function main() {
           env: {
             ...(existsSync(configPath) ? { CONFIG_PATH: configPath } : {}),
           },
+          onRestart: registerWithKernel,
         });
 
         // Register with kernel so outbound messages get routed here
-        await kernelClient.registerSkillService({
-          skillId,
-          type: type ?? "channel",
-          capabilities: capabilities ?? [],
-          endpoint: `http://localhost:${port}`,
-        });
+        await registerWithKernel();
 
         logger.info({ skillId, port, entrypoint }, "Auto-started skill from manifest");
       } catch (err) {
