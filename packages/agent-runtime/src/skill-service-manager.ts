@@ -24,10 +24,17 @@ export class SkillServiceManager {
 
   /** Start a skill service as a subprocess. */
   async start(opts: { skillId: string; command: string; args?: string[]; port?: number; env?: Record<string, string>; onRestart?: () => Promise<void> }): Promise<void> {
-    const { skillId, command, args = [] } = opts;
+    let { skillId, command, args = [] } = opts;
 
     if (this.services.has(skillId)) {
       throw new Error(`Skill service '${skillId}' is already running`);
+    }
+
+    // Defensive: if command contains spaces and no args, split it
+    if (command.includes(" ") && args.length === 0) {
+      const parts = command.split(/\s+/);
+      command = parts[0];
+      args = parts.slice(1);
     }
 
     const extraEnv: Record<string, string> = {
@@ -139,6 +146,11 @@ export class SkillServiceManager {
 
     child.stderr?.on("data", (data: Buffer) => {
       logger.warn({ skillId, stream: "stderr" }, data.toString().trim());
+    });
+
+    child.on("error", (err) => {
+      logger.error({ skillId, err: err.message }, "Skill service spawn error");
+      this.services.delete(skillId);
     });
 
     child.on("exit", (code, signal) => {
