@@ -7,6 +7,41 @@
 
 ---
 
+## 核心哲学：Agent OS，不是 Chatbot Framework
+
+CodeClaw 不是在造聊天机器人框架，而是在造 **AI 的操作系统**。以下三个隐喻是全部设计决策的底层逻辑，后续章节的具体原则皆可归约于此。
+
+### 一切皆文件（Everything is a File）
+
+Unix 用一个统一接口（open/read/write/close）连接了所有异构资源。CodeClaw 把这个原则推到 AI Agent 的语境中：聊天记录是 JSONL 文件，Skill 说明书是 markdown 文件，配置是 JSON 文件，记忆是 markdown + SQLite，Skill 元数据是 manifest.json。
+
+**深层含义**：文件系统是 Agent 和框架之间的**唯一契约面**。框架写文件（使信息可达），Agent 读文件（按需获取上下文）。两者通过文件系统解耦，不通过 prompt 注入耦合。传统做法把聊天记录截断注入 prompt、把 Skill 描述塞进 system prompt——本质是框架替 Agent 做了信息筛选的决定。正确的做法是让信息以文件形式存在，Agent 自己判断需要什么。
+
+### 代码即工具（Code is the Tool）
+
+对于拥有 Bash/Write/Edit 能力的 Agent，代码就是最自然的扩展机制。不需要插件协议、不需要 UI 配置、不需要 DSL。通道 Skill 是可执行的进程（service.ts），工具 Skill 是 Agent 自写的脚本（weather.ts），安装 Skill 就是复制 manifest——Agent 的能力上限等于它能写什么代码，而不是框架预置了多少工具。
+
+### Agent 即用户（Agent is a User）
+
+Agent 不是一个"被框架驱动的进程"，而是一个"使用操作系统的用户"。Home 目录 `~` 是 Agent 的全部身份空间，`~/.claude/` 遵循 XDG 式约定（skills, data, cache, config, memory）。安装 Skill ≈ `apt install`，启动服务 ≈ `systemd start`，卸载 ≈ `rm -rf`。
+
+这个隐喻的力量在于：AI 天生理解"用户使用操作系统"这个概念，因为训练数据里有海量的 Unix 知识。不需要教 Agent 学习新的框架 API——它已经知道 home 目录是什么、文件系统怎么组织、进程怎么管理。
+
+### 框架的角色：监督器，不是能力提供者
+
+三个隐喻共同推导出框架（Agent Runtime）的定位——**进程监督器（Supervisor）**。框架扫描 manifest 启动进程、分配端口注册路由、传递环境变量恢复 crash 状态、验证输入合法性。框架不决定 Agent 读什么文件、不解析消息语义、不管理聊天历史截断、不实现 Skill 业务逻辑。框架是内核，不是应用。
+
+### 与后续原则的关系
+
+| 后续章节的具体原则 | 归属隐喻 |
+|---------|---------|
+| 文件系统即上下文、朴素优先 | 一切皆文件 |
+| 代码是一等公民、Agent 是开发者、Skill 是唯一扩展机制 | 代码即工具 |
+| Agent 是用户不是项目、存在感 > 人格 | Agent 即用户 |
+| Kernel 只做路由、为 AI 设计 | 框架是监督器 |
+
+---
+
 ## 一、问题：为什么现有方案不够好
 
 ### OpenClaw 的问题：Chat-first 的根本局限
