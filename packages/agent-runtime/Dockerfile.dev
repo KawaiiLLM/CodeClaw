@@ -22,6 +22,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
 COPY packages/types/ packages/types/
 COPY packages/agent-runtime/ packages/agent-runtime/
 COPY skills/ skills/
+COPY workspace-template/CLAUDE.md /codeclaw/workspace-template/CLAUDE.md
 
 # Install pnpm and dependencies (includes skills)
 RUN npm install -g pnpm && pnpm config set registry https://registry.npmmirror.com && pnpm install --no-frozen-lockfile
@@ -40,4 +41,5 @@ WORKDIR /home/codeclaw
 USER codeclaw
 
 # Start agent runtime with tsx
-CMD ["tsx", "/codeclaw/packages/agent-runtime/src/index.ts"]
+# Copy CLAUDE.md to home on start (volume mount overrides build-time files)
+CMD ["sh", "-c", "cp -n /codeclaw/workspace-template/CLAUDE.md ~/CLAUDE.md 2>/dev/null; exec tsx /codeclaw/packages/agent-runtime/src/index.ts"]
