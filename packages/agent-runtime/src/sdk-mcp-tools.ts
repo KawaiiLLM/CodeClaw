@@ -28,12 +28,16 @@ export function createSdkMcpTools(
   wasSendMessageCalled: () => boolean;
   resetSendFlag: () => void;
   getCurrentConversation: (fn: () => ConversationInfo | null) => void;
+  onMessageSent: (fn: () => void) => void;
 } {
   // Double-send guard: tracks whether send_message was invoked in the current turn
   let sentViaToolInTurn = false;
 
   // Callback to resolve current conversation from agent-loop's lastMessage
   let getConversation: (() => ConversationInfo | null) | null = null;
+
+  // Callback to notify agent-loop that a message was sent (e.g. to stop typing)
+  let messageSentCallback: (() => void) | null = null;
 
   const sendMessage = tool(
     "send_message",
@@ -53,6 +57,7 @@ export function createSdkMcpTools(
           replyTo,
         });
         sentViaToolInTurn = true;
+        messageSentCallback?.();
         return { content: [{ type: "text" as const, text: `Message sent to ${channel}/${conversation}` }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -196,5 +201,6 @@ export function createSdkMcpTools(
     wasSendMessageCalled: () => sentViaToolInTurn,
     resetSendFlag: () => { sentViaToolInTurn = false; },
     getCurrentConversation: (fn: () => ConversationInfo | null) => { getConversation = fn; },
+    onMessageSent: (fn: () => void) => { messageSentCallback = fn; },
   };
 }

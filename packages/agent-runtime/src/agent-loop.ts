@@ -71,6 +71,13 @@ async function downloadImageAsBase64(
   }
 }
 
+/** Truncate a string by Unicode code points (not UTF-16 code units) to avoid splitting surrogate pairs. */
+function safeSlice(s: string, maxCodePoints: number): string {
+  const chars = [...s]; // spread iterates by code point
+  if (chars.length <= maxCodePoints) return s;
+  return chars.slice(0, maxCodePoints).join("");
+}
+
 const PREVIEW_LIMIT = 200; // Short text threshold (characters)
 
 function formatSize(bytes: number): string {
@@ -93,7 +100,7 @@ async function formatMessageForAgent(msg: InboundMessage): Promise<MessageParam[
     if (text.length <= PREVIEW_LIMIT) {
       return `${tag} ${sender}${replyTag}: ${text}`;
     }
-    const preview = text.slice(0, 100) + "...";
+    const preview = safeSlice(text, 100) + "...";
     const dataDir = `~/.claude/data/${msg.channel}`;
     return `${tag} ${sender}${replyTag}: ${preview}\n  → full text in ${dataDir}/${msg.conversation.id}.jsonl (id: ${msg.id})`;
   }
@@ -262,12 +269,15 @@ async function runSdkLoop(
   logger.info({ model, baseURL: baseURL ?? "(default)", workspacePath }, "Running in SDK mode");
 
   // Create MCP tools with double-send guard
-  const { server: mcpServer, wasSendMessageCalled, resetSendFlag, getCurrentConversation: setConversationCallback } =
+  const { server: mcpServer, wasSendMessageCalled, resetSendFlag, getCurrentConversation: setConversationCallback, onMessageSent } =
     createSdkMcpToolsFn(kernelClient, skillServiceManager);
 
   // Track last message for fallback reply routing
   let lastMessage: InboundMessage | null = null;
   let sessionId = "";
+
+  // Stop typing as soon as agent sends a reply (don't wait for SDK result event)
+  onMessageSent(() => stopTyping());
 
   // Wire up auto-routing: update_progress reads channel/conversation from lastMessage
   setConversationCallback(() => {
