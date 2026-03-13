@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, extname } from "node:path";
 import { KernelClient } from "./kernel-client.js";
 import { MessageInjector } from "./message-injector.js";
 import { SkillServiceManager } from "./skill-service-manager.js";
@@ -29,24 +29,51 @@ async function main() {
   process.on("SIGTERM", () => void shutdown());
   process.on("SIGINT", () => void shutdown());
 
-  // Auto-start skills that have config files
+  // Auto-start installed skills from manifests
+  const skillsDir = join(workspacePath, ".claude", "skills");
   const configDir = join(workspacePath, ".claude", "config");
-  const skillSources: Record<string, string> = {
-    telegram: "/codeclaw/skills/telegram/service.ts",
-  };
-  for (const [skillId, scriptPath] of Object.entries(skillSources)) {
-    const configPath = join(configDir, `${skillId}.json`);
-    if (existsSync(configPath) && existsSync(scriptPath)) {
+  const PORT_BASE = 7001;
+  let nextPort = PORT_BASE;
+
+  if (existsSync(skillsDir)) {
+    for (const entry of readdirSync(skillsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const manifestPath = join(skillsDir, entry.name, "manifest.json");
+      if (!existsSync(manifestPath)) continue;
+
       try {
+        const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+        const { skillId, entrypoint, type, capabilities } = manifest;
+        if (!skillId || !entrypoint) {
+          logger.warn({ manifestPath }, "Skipping manifest: missing skillId or entrypoint");
+          continue;
+        }
+
+        const port = nextPort++;
+        const configPath = join(configDir, `${skillId}.json`);
+        const command = extname(entrypoint) === ".ts" ? "tsx" : "node";
+
         await skillServiceManager.start({
           skillId,
-          command: "tsx",
-          args: [scriptPath],
-          env: { CONFIG_PATH: configPath },
+          command,
+          args: [entrypoint],
+          port,
+          env: {
+            ...(existsSync(configPath) ? { CONFIG_PATH: configPath } : {}),
+          },
         });
-        logger.info({ skillId, configPath }, "Auto-started skill service");
+
+        // Register with kernel so outbound messages get routed here
+        await kernelClient.registerSkillService({
+          skillId,
+          type: type ?? "channel",
+          capabilities: capabilities ?? [],
+          endpoint: `http://localhost:${port}`,
+        });
+
+        logger.info({ skillId, port, entrypoint }, "Auto-started skill from manifest");
       } catch (err) {
-        logger.error({ skillId, err }, "Failed to auto-start skill service");
+        logger.error({ err, manifestPath }, "Failed to start skill from manifest");
       }
     }
   }

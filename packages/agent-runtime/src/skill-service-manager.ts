@@ -20,14 +20,18 @@ export class SkillServiceManager {
   constructor(private kernelClient: KernelClient) {}
 
   /** Start a skill service as a subprocess. */
-  async start(opts: { skillId: string; command: string; args?: string[]; env?: Record<string, string> }): Promise<void> {
+  async start(opts: { skillId: string; command: string; args?: string[]; port?: number; env?: Record<string, string> }): Promise<void> {
     const { skillId, command, args = [] } = opts;
 
     if (this.services.has(skillId)) {
       throw new Error(`Skill service '${skillId}' is already running`);
     }
 
-    const child = this.spawnService(skillId, command, args, opts.env);
+    const env = {
+      ...opts.env,
+      ...(opts.port ? { SERVICE_PORT: String(opts.port) } : {}),
+    };
+    const child = this.spawnService(skillId, command, args, env);
 
     this.services.set(skillId, {
       skillId,

@@ -1,0 +1,6 @@
+{
+  "skillId": "telegram",
+  "type": "channel",
+  "entrypoint": "/codeclaw/skills/telegram/service.ts",
+  "capabilities": ["send_message", "receive_message"]
+}

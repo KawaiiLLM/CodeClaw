@@ -25,7 +25,6 @@ const CONFIG_PATH = process.env.CONFIG_PATH ?? `${HOME}/.claude/config/telegram.
 const DATA_DIR = `${HOME}/.claude/data/telegram`;
 const KERNEL_URL = process.env.KERNEL_URL ?? "http://localhost:19000";
 const SERVICE_PORT = parseInt(process.env.SERVICE_PORT ?? "7001", 10);
-const SKILL_ID = process.env.SKILL_ID ?? "telegram";
 
 function loadConfig(): TelegramConfig {
   const raw = readFileSync(CONFIG_PATH, "utf-8");
@@ -66,24 +65,7 @@ async function main() {
     console.log(`[telegram] Bot identity: @${me.username} (id: ${me.id})`);
   });
 
-  console.log(`[telegram] Starting with kernel at ${KERNEL_URL}`);
-
-  // Register with kernel I/O Bridge
-  const regRes = await fetch(`${KERNEL_URL}/api/services/register`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      skillId: SKILL_ID,
-      type: "channel",
-      capabilities: ["send_message", "receive_message"],
-      endpoint: `http://localhost:${SERVICE_PORT}`,
-    }),
-  });
-
-  if (!regRes.ok) {
-    throw new Error(`Failed to register with kernel: ${regRes.status} ${await regRes.text()}`);
-  }
-  console.log("[telegram] Registered with kernel I/O Bridge");
+  console.log(`[telegram] Starting (kernel: ${KERNEL_URL}, port: ${SERVICE_PORT})`);
 
   // --- JSONL persistence helpers ---
 
@@ -484,19 +466,11 @@ async function main() {
     },
   });
 
-  // Graceful shutdown
+  // Graceful shutdown (unregister handled by framework)
   const shutdown = () => {
     console.log("[telegram] Shutting down...");
     bot.stop();
     httpServer.close();
-
-    // Unregister from kernel
-    fetch(`${KERNEL_URL}/api/services/unregister`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ skillId: SKILL_ID }),
-    }).catch(() => {});
-
     process.exit(0);
   };
 
