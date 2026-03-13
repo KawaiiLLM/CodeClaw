@@ -30,6 +30,7 @@ RUN npm install -g pnpm && pnpm config set registry https://registry.npmmirror.c
 RUN userdel -r node && \
     useradd -u 1000 -m -s /bin/bash codeclaw && \
     mkdir -p /home/codeclaw/.claude/skills /home/codeclaw/.claude/data /home/codeclaw/.claude/cache /home/codeclaw/.claude/memory /home/codeclaw/.claude/config && \
+    ln -s /codeclaw/skills/telegram /home/codeclaw/.claude/skills/telegram && \
     chown -R codeclaw:codeclaw /home/codeclaw
 
 # Home directory is mounted as a volume for persistence

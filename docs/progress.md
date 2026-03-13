@@ -16,6 +16,7 @@
 | Phase 4: 端到端联调 | ✅ 完成 | SDK 模式全链路已验证 (Telegram → Agent SDK → Claude → Telegram) |
 | Phase 5a: Home 目录迁移 | ✅ 完成 | /workspace → /home/codeclaw, JSONL 聊天持久化, 通知风格消息 |
 | Phase 5: 活跃状态 + 进度消息 | ✅ 完成 | 两层信号架构: Chat Action (自动 typing) + Progress Messages (Agent 主动) |
+| Phase 5b: Telegram 增强 | ✅ 完成 | JSONL 重构 (date 目录 + seq ID), 401 熔断器, 14 个 MCP 工具, Skill-side 通知格式化, 出站语义分流 |
 | Phase 6: 安全约束与审批 | 📋 待实现 | 白名单 + Emoji 审批 |
 
 ---
@@ -53,7 +54,7 @@ codeclaw/
 │       └── src/
 │           ├── index.ts            # 容器入口, 组装 + 信号处理
 │           ├── agent-loop.ts       # ⚡ 核心: SDK/chat/stub 三层模式 + typing indicator
-│           ├── sdk-mcp-tools.ts    # SDK 原生 MCP server (7 工具 + double-send guard)
+│           ├── sdk-mcp-tools.ts    # SDK 原生 MCP server (14 工具 + double-send guard)
 │           ├── kernel-client.ts    # HTTP 客户端 (GET/POST kernel API, 返回 messageId)
 │           ├── message-injector.ts # 轮询内核 + drain loop + waitForMessage()
 │           ├── mcp-server.ts       # MCP 工具 (send_message, queue, skill 管理)
@@ -62,7 +63,7 @@ codeclaw/
 │           └── logger.ts           # pino
 ├── skills/
 │   └── telegram/
-│       ├── service.ts              # grammy bot + /send /edit /action 端点 + JSONL
+│       ├── service.ts              # grammy bot + 9 端点 (/send /edit /action /react /delete /sticker /sticker_set /poll /get_message) + JSONL (date dirs + seq)
 │       ├── package.json            # grammy + undici
 │       ├── SKILL.md                # Agent 可读安装指南
 │       └── config.schema.json
@@ -98,7 +99,7 @@ ea1c0d8 feat: manifest-based skill lifecycle with dynamic port allocation
 
 1. **SDK 模式** (✅ 已实现, 最高优先级): `@anthropic-ai/claude-agent-sdk` 的 `query()` + Streaming Input
    - 完整 Claude Code 能力: Bash, Read, Write, Edit, Glob, Grep 等内置工具
-   - MCP 集成: 通过 `sdk-mcp-tools.ts` 提供 7 个 CodeClaw 工具 (send_message, skip_reply, update_progress, get_queue_status, skill 管理 ×3)
+   - MCP 集成: 通过 `sdk-mcp-tools.ts` 提供 14 个 CodeClaw 工具 (send_message, skip_reply, update_progress, get_queue_status, react/edit/delete_message, send_sticker, get_sticker_set, send_poll, get_message, skill 管理 ×3)
    - Session resume 支持 (`persistSession: true`)
    - CLAUDE.md 加载 (`settingSources: ["project"]`)
    - System prompt 使用 `claude_code` preset + CodeClaw 追加指令
@@ -214,6 +215,10 @@ docker logs codeclaw-agent-andy         # 查看 agent 日志
 | M8: Home 目录迁移 | ✅ | /workspace → /home/codeclaw, JSONL 聊天持久化, 通知风格消息 |
 | M9: Typing 指示器 | ✅ | 处理消息时 Telegram 显示"正在输入...", 回复后立即停止 |
 | M10: 进度消息 | ✅ | update_progress MCP 工具, 出站链路返回 messageId, /edit 端点 |
+| M11: JSONL 重构 | ✅ | date 目录 + seq ID, Skill-side 通知格式化, 引用消息持久化 |
+| M12: 401 熔断器 | ✅ | sendChatAction 指数退避 + 永久挂起, Grammy error_code 检测 |
+| M13: Rich Agent 工具 | ✅ | 14 个 MCP 工具: react/edit/delete/sticker/poll/get_message + 出站语义分流 |
+| M14: 架构边界清理 | ✅ | Agent Runtime 纯透传, Telegram 细节移至 SKILL.md, OutboundMessage skillEndpoint 路由 |
 
 ---
 
@@ -226,6 +231,10 @@ docker logs codeclaw-agent-andy         # 查看 agent 日志
 - ~~Telegram 文件消息~~ → ✅ 图片 (photo) 和贴纸 (sticker) 已支持下载 + base64 转发
 - ~~Telegram 回复引用截断 emoji 导致 API 500~~ → ✅ `safeSlice()` 按 code point 截断, 不切割代理对
 - ~~回复后仍显示 typing~~ → ✅ `onMessageSent` 回调在 `send_message` 后立即停止 typing
+- ~~Agent Runtime 解析 Telegram 字段~~ → ✅ `formatMessageForAgent` 纯透传, Skill-side 通知格式化
+- ~~JSONL 无 seq ID~~ → ✅ date 目录 + seq ID + 内存索引
+- ~~sendChatAction 401 无保护~~ → ✅ 熔断器 (指数退避 + 永久挂起)
+- ~~Telegram 音频/贴纸/视频被丢弃~~ → ✅ 全部持久化到 JSONL + 文件, 占位符转发
 
 ### 剩余技术债
 
@@ -233,8 +242,7 @@ docker logs codeclaw-agent-andy         # 查看 agent 日志
 2. **Telegram Skill 代理**: 使用 Grammy transformer + undici ProxyAgent 绕过 Node.js 内置 fetch 不识别代理的问题; transformer 硬编码 `Content-Type: application/json`, 不支持 multipart/form-data
 3. **Chat 模式无工具**: chat 模式仍为纯文字对话, 无 MCP 工具集成 (mcp-server.ts 未在 chat 模式中使用)
 4. **Skill 安装体验**: 当前手动配置, 未实现通过自然语言安装
-5. **Telegram 音频/贴纸/视频消息**: DM 中 sticker/audio/voice/video 被静默丢弃, 仅群聊 buffer
-6. **JSONL 同步写入**: `appendFileSync` 在高消息量下可能阻塞 event loop, 考虑异步写入
+5. **JSONL 同步写入**: `appendFileSync` 在高消息量下可能阻塞 event loop, 考虑异步写入
 
 ---
 
@@ -255,6 +263,12 @@ docker logs codeclaw-agent-andy         # 查看 agent 日志
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | /send | 发送消息 (支持 `progress` 标记跳过 JSONL, 返回 `messageId`) |
+| POST | /send | 发送消息 (支持 `progress` 标记跳过 JSONL, 返回 `messageId` + `seq`) |
 | POST | /edit | 编辑已发送的消息 (不写 JSONL) |
-| POST | /action | 发送 chat action (如 typing, 失败静默) |
+| POST | /action | 发送 chat action (如 typing, 401 熔断器保护) |
+| POST | /react | 添加/移除 Emoji 反应 (`setMessageReaction`) |
+| POST | /delete | 删除消息 (`deleteMessage`) |
+| POST | /sticker | 发送贴纸 (写 JSONL, 返回 `messageId`) |
+| POST | /sticker_set | 获取贴纸包 (分页, thumbnail base64, limit 上限 20) |
+| POST | /poll | 创建投票 (返回 `messageId` + `pollId`) |
+| POST | /get_message | 查询 JSONL 消息 (按 seq O(1) 或 messageId 扫描, 含 attachments) |

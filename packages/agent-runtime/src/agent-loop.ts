@@ -35,106 +35,32 @@ function resolveProxy(): string | undefined {
     ?? process.env.http_proxy ?? process.env.https_proxy;
 }
 
-/** Detect image format from magic bytes. Returns a Claude-compatible media type or null. */
-function detectImageType(buf: Buffer): string | null {
-  if (buf[0] === 0xFF && buf[1] === 0xD8) return "image/jpeg";
-  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return "image/png";
-  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return "image/gif";
-  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
-      buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return "image/webp";
-  return null;
-}
 
 /**
- * Download an image URL and return base64-encoded data with media type.
- * Falls back to URL source if download fails.
- */
-async function downloadImageAsBase64(
-  url: string,
-): Promise<{ type: "base64"; media_type: string; data: string } | { type: "url"; url: string }> {
-  try {
-    const httpProxy = resolveProxy();
-    const fetchOpts: Record<string, unknown> = {};
-    if (httpProxy) {
-      fetchOpts.dispatcher = new ProxyAgent(httpProxy);
-    }
-    const res = await undiciFetch(url, fetchOpts as any);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const buf = Buffer.from(await res.arrayBuffer());
-    // Detect media type from magic bytes, fallback to Content-Type header
-    const headerType = (res.headers.get("content-type") ?? "").split(";")[0].trim();
-    const mediaType = detectImageType(buf) ?? (headerType || "image/jpeg");
-    return { type: "base64", media_type: mediaType, data: buf.toString("base64") };
-  } catch (err) {
-    logger.warn({ err, url }, "Failed to download image, falling back to URL source");
-    return { type: "url", url };
-  }
-}
-
-/** Truncate a string by Unicode code points (not UTF-16 code units) to avoid splitting surrogate pairs. */
-function safeSlice(s: string, maxCodePoints: number): string {
-  const chars = [...s]; // spread iterates by code point
-  if (chars.length <= maxCodePoints) return s;
-  return chars.slice(0, maxCodePoints).join("");
-}
-
-const PREVIEW_LIMIT = 200; // Short text threshold (characters)
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-/**
- * Format an inbound message as a phone-notification-style summary.
- * Short text shown in full; long text/files show preview + path for Read/Grep.
+ * Convert InboundMessage content to SDK-compatible format.
+ * Skill has already formatted notification text and embedded metadata.
+ * This function only handles the generic MessageContent → SDK conversion.
  */
 async function formatMessageForAgent(msg: InboundMessage): Promise<MessageParam["content"]> {
-  const tag = `[${msg.channel}/${msg.conversation.id}]`;
-  const sender = msg.sender.name;
-  const replyTag = msg.replyTo ? ` (replying to ${msg.replyTo})` : "";
-
   if (msg.content.type === "text") {
-    const text = msg.content.text;
-    if (text.length <= PREVIEW_LIMIT) {
-      return `${tag} ${sender}${replyTag}: ${text}`;
-    }
-    const preview = safeSlice(text, 100) + "...";
-    const dataDir = `~/.claude/data/${msg.channel}`;
-    return `${tag} ${sender}${replyTag}: ${preview}\n  → full text in ${dataDir}/${msg.conversation.id}.jsonl (id: ${msg.id})`;
+    return msg.content.text;
   }
 
   if (msg.content.type === "image") {
-    const caption = msg.content.caption || "[image]";
-    if (msg.content.url) {
-      const imageSource = await downloadImageAsBase64(msg.content.url);
-      const blocks: Anthropic.ContentBlockParam[] = [
-        { type: "image", source: imageSource as any },
-      ];
-      const textLine = msg.content.path
-        ? `${tag} ${sender}${replyTag}: ${caption}\n  → ${msg.content.path}`
-        : `${tag} ${sender}${replyTag}: ${caption}`;
-      blocks.push({ type: "text", text: textLine });
-      return blocks;
+    const blocks: Anthropic.ContentBlockParam[] = [];
+    if (msg.content.caption) {
+      blocks.push({ type: "text", text: msg.content.caption });
     }
-    return `${tag} ${sender}${replyTag}: ${caption}`;
+    if (msg.content.data && msg.content.mimeType) {
+      blocks.push({
+        type: "image",
+        source: { type: "base64", media_type: msg.content.mimeType as "image/jpeg", data: msg.content.data },
+      });
+    }
+    return blocks.length > 0 ? blocks : `[${msg.channel}] image without data`;
   }
 
-  if (msg.content.type === "audio") {
-    const dur = msg.content.duration ? ` ${msg.content.duration}s` : "";
-    const pathRef = msg.content.path ? `\n  → ${msg.content.path}` : "";
-    return `${tag} ${sender}${replyTag}: [audio${dur}]${pathRef}`;
-  }
-
-  if (msg.content.type === "file") {
-    const name = msg.content.filename;
-    const size = msg.content.size ? ` (${formatSize(msg.content.size)})` : "";
-    const pathRef = msg.content.path ? `\n  → ${msg.content.path}` : "";
-    return `${tag} ${sender}${replyTag}: [file] ${name}${size}${pathRef}`;
-  }
-
-  return `${tag} ${sender}${replyTag}: [unknown content]`;
+  return `[${msg.channel}] unsupported content type: ${msg.content.type}`;
 }
 
 // --- Agent modes ---
@@ -161,28 +87,20 @@ const SDK_SYSTEM_APPEND = `You are CodeClaw, a personal AI agent running inside 
 Your home directory is ~ (/home/codeclaw). This is your persistent workspace.
 
 You receive messages from various channels (Telegram, web, etc.) via a message queue.
-Messages are formatted as notifications: [channel/conversationId] Sender: content preview.
-
-IMPORTANT RULES:
-- Use the send_message MCP tool to reply to users on their channel.
-- When replying, extract the channel and conversation ID from the [channel/conversationId] tag.
-- For long messages or files, the full content path is shown after "→". Use Read or Grep to access it.
-- Chat history is persisted as JSONL in ~/.claude/data/<channel>/. Use Grep to search past conversations.
-- Keep responses concise and helpful.
+Each message includes metadata embedded in the content text by the channel Skill.
+Extract channel and conversation ID from the message header [channel/chatId].
 
 DIRECTORY STRUCTURE:
-- ~/.claude/skills/     — Installed skills (each has SKILL.md)
+- ~/.claude/skills/     — Installed Skills (each has SKILL.md with channel-specific details)
 - ~/.claude/data/       — Skill persistent data (chat logs, files)
 - ~/.claude/cache/      — Temporary files (safe to clean)
 - ~/.claude/memory/     — Your long-term memory
 - ~/.claude/config/     — Configuration files
 - ~/Projects/           — Create project directories here as needed
 
-GROUP CHAT BEHAVIOR:
-- Messages prefixed with "[Recent group messages ... unread]" include context from before you were @mentioned.
-- Messages marked "[Active window message — reply only if relevant]" are from an ongoing group conversation.
-  You are NOT required to reply to every active window message. Only reply when you have something useful to add.
-  Use the skip_reply MCP tool to acknowledge a message without sending a reply.`;
+RULES:
+- Messages may include reply-to references — use get_message to fetch context if needed
+- Keep responses concise and helpful`;
 
 /**
  * Bridges MessageInjector → AsyncIterable<SDKUserMessage> for the SDK query() stream input.
