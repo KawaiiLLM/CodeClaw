@@ -1,7 +1,7 @@
 # CodeClaw 实现进度记录
 
 > 最后更新: 2026-03-13
-> 最新提交: `6d26bf7` fix: address code review Critical and Important issues
+> 最新提交: `6575886` docs: distill core philosophy — Agent OS, not Chatbot Framework
 
 ---
 
