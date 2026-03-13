@@ -682,21 +682,26 @@ agent-loop.ts 在 SDK 处理消息期间，周期性发送 `typing` 状态。不
 
 **任务**：
 
-**5A.1 agent-loop.ts 记录当前活跃会话**
-- 收到 inbound 消息时，记录 `lastConversation: { channel, conversationId }`
-- 这是 chat action 的发送目标
+**5A.1 `SkillServiceManager.getEndpoint(skillId)` 方法**
+- `RunningService` 接口增加可选 `port?: number` 字段（start 时存入）
+- 新增方法 `getEndpoint(skillId: string): string | null`，返回 `http://localhost:${port}` 或 null
+- 保持 `SkillServiceManager` 作为 Skill 信息的**单一数据源**，agent-loop 不持有静态映射
+- 注意：Chat Action 直连是特例（低级信号不经 Kernel），不是通用模式
 
-**5A.2 agent-loop.ts 中 Skill endpoint 直连**
-- agent-loop 需要知道 Skill 的 localhost endpoint（从 `SkillServiceManager` 或 `index.ts` 传入 channel→endpoint 映射）
-- 在 SDK 消息流循环中，每收到一条 SDK 事件（`assistant`/`tool_use`/`tool_result`），触发一次 typing
-- 节流：同一 conversation 最多每 4 秒发一次（Telegram chat action 持续 5 秒）
-- 实现：`setInterval` 定时发送，在 `result` 消息到达时清除
+**5A.2 agent-loop.ts `setInterval` 定时 typing**
+- 收到 inbound 消息时，记录 `lastConversation: { channel, conversationId }`
+- 通过 `skillServiceManager.getEndpoint(channel)` 获取 Skill 地址
+- 开始处理后启动 `setInterval`（每 4 秒），向 Skill `/action` 发 `typing`
+- 收到 `result` 消息后清除 interval
+- 收到下一条 inbound 消息后重新启动 interval
+- 发送失败静默忽略（chat action 丢了无影响）
+- 注意：采用 `setInterval` 而非 SDK 事件驱动，不依赖 SDK 事件类型的完整性
 
 **5A.3 Telegram Skill `/action` 端点**
-- 新增 `POST /action` handler
+- 新增 `POST /action` handler（扩展现有 httpServer 路由）
 - body: `{ conversation: string, action: string }`
 - 调用 `bot.api.sendChatAction(conversation, action)`
-- 失败静默（chat action 丢了无影响）
+- 失败静默，返回 `{ success: true }`
 
 **验证**：
 - [ ] Agent 收到消息开始处理时，Telegram 显示 "正在输入..."
@@ -721,41 +726,68 @@ Agent: ⏳ 正在分析你发的代码...
 - 符合"框架是监督器，不替 Agent 做决策"原则
 - 代价是消耗少量 token，但 Agent 可选择不调用（简单任务不需要进度）
 
+**前置依赖：出站链路需要返回 messageId**
+
+当前出站链路四层全部返回 void / `{ success: true }`，不透传 Skill 响应。`update_progress` 第一次调用需要拿到 Telegram 的 `message_id` 才能后续编辑。
+
 **任务**：
+
+**5B.0 出站链路返回 Skill 响应（前置改造）**
+
+需要改造四层调用链使 messageId 能回传：
+
+1. **Telegram Skill `/send`**：`bot.api.sendMessage()` 返回 `Message` 对象。修改返回值为 `{ success: true, messageId: msg.message_id }`
+2. **`IOBridge.routeOutbound()`**：返回类型从 `Promise<void>` 改为 `Promise<Record<string, unknown>>`，透传 Skill 的 JSON 响应体
+3. **Kernel `POST /api/messages/outbound` handler**：透传 `routeOutbound` 的返回值（替代硬编码的 `{ success: true }`）
+4. **`KernelClient.sendMessage()`**：返回类型从 `Promise<void>` 改为 `Promise<{ messageId?: string }>`，解析 Kernel 响应
+
+文件变更：`service.ts` → `io-bridge.ts` → `http-server.ts` → `kernel-client.ts`
+
+> 这是向后兼容的改造——现有 `send_message` 调用不使用返回值，不会被破坏。
 
 **5B.1 Telegram Skill `/edit` 端点**
 - 新增 `POST /edit` handler
 - body: `{ conversation: string, messageId: number, text: string }`
 - 调用 `bot.api.editMessageText(conversation, messageId, text)`
 - 返回 `{ success: true }` 或 `{ error: string }`
+- **不写入 JSONL**（编辑操作是瞬态进度更新）
 
 **5B.2 Kernel 出站路由扩展**
-- 现有 `POST /api/messages/outbound` 已支持 `{ channel, conversation, content }`
-- 扩展 `OutboundMessage` 增加可选字段：`editMessageId?: string`
-- IOBridge `routeOutbound` 转发时：有 `editMessageId` → 调 Skill `/edit`，无 → 调 `/send`（现有行为）
+- `OutboundMessage`（`packages/types/src/messages.ts`）增加可选字段：`editMessageId?: string`
+- `IOBridge.routeOutbound` 转发时：有 `editMessageId` → 调 Skill `/edit`，无 → 调 `/send`（现有行为）
+- Kernel `POST /api/messages/outbound` handler：透传路由结果（5B.0 已改造）
 
 **5B.3 `update_progress` MCP 工具**
 - 在 `sdk-mcp-tools.ts` 新增工具
-- 参数：`{ channel: string, conversation: string, text: string, messageId?: string }`
-- 无 messageId → 调 `kernelClient.sendMessage` 发新消息 → 记录返回的 messageId
+- 参数简化为 `{ text: string, messageId?: string }`（**不需要 channel/conversation**）
+- 框架自动从 agent-loop 的 `lastMessage` 获取路由信息（通过 `getCurrentConversation` 回调传入 `createSdkMcpTools`）
+- 无 messageId → 调 `kernelClient.sendMessage` → 从返回值取 `messageId`
 - 有 messageId → 调 `kernelClient.sendMessage` 带 `editMessageId` → 编辑已有消息
-- 返回 `{ messageId: string }`（供后续编辑调用）
+- 返回 `{ messageId: string }`（供 Agent 后续编辑调用）
 - **不触发 double-send guard**（进度消息不是最终回复）
-- **不写入 JSONL**（瞬态进度，不是聊天记录）
 
-**5B.4 CLAUDE.md 进度指引**
+> 简化参数的理由：框架已知消息从哪来（lastMessage），Agent 不需要手动传路由信息。降低认知负担和出错概率，符合"框架保证可达"原则。
+
+**5B.4 Telegram Skill `/send` 进度标记**
+- `/send` body 增加可选 `progress?: boolean` 字段
+- 当 `progress: true` 时，跳过 JSONL 写入（瞬态进度不是聊天记录）
+- `update_progress` MCP 工具在首次发送时带 `progress: true`
+
+**5B.5 CLAUDE.md 进度指引**
 - 在 Agent 的 CLAUDE.md 中添加 `update_progress` 使用指引：
   - 复杂任务（预计 >10s）开始时发一条进度
-  - 中间步骤有意义的进展时编辑更新
+  - 中间步骤有意义的进展时编辑更新（传入上次返回的 messageId）
   - 最终回复通过 `send_message` 发送（替代进度消息）
   - 简单任务不需要进度（直接回复即可）
 
 **验证**：
 - [ ] Agent 执行复杂任务时，Telegram 出现进度消息并实时更新
-- [ ] 进度消息不写入 JSONL
+- [ ] 进度消息（`progress: true`）不写入 JSONL
+- [ ] `/edit` 端点的编辑操作不写入 JSONL
 - [ ] 进度消息不触发 double-send guard
-- [ ] 最终回复正常发送
-- [ ] 编辑频率由 Agent 自控（无需框架节流）
+- [ ] 最终回复通过 `send_message` 正常发送并写入 JSONL
+- [ ] `update_progress` 不需要 Agent 传 channel/conversation
+- [ ] 出站链路返回 messageId（`/send` → IOBridge → Kernel → KernelClient）
 - [ ] Kernel 日志显示 outbound 带 editMessageId 时路由到 /edit
 
 ---
