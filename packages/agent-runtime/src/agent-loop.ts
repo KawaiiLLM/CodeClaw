@@ -227,6 +227,25 @@ class MessageStream {
   }
 }
 
+/** Send a chat action (e.g. "typing") directly to the Skill, bypassing Kernel. */
+function sendChatAction(
+  skillServiceManager: SkillServiceManager,
+  channel: string,
+  conversationId: string,
+  action: string,
+): void {
+  const endpoint = skillServiceManager.getEndpoint(channel);
+  if (!endpoint) return;
+  // Global fetch is correct here: /action goes to localhost (same container), no proxy needed
+  fetch(`${endpoint}/action`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversation: conversationId, action }),
+  }).catch(() => {}); // Fire-and-forget, failures silently ignored
+}
+
+const TYPING_INTERVAL_MS = 4000;
+
 async function runSdkLoop(
   injector: MessageInjector,
   kernelClient: KernelClient,
@@ -243,12 +262,43 @@ async function runSdkLoop(
   logger.info({ model, baseURL: baseURL ?? "(default)", workspacePath }, "Running in SDK mode");
 
   // Create MCP tools with double-send guard
-  const { server: mcpServer, wasSendMessageCalled, resetSendFlag } =
+  const { server: mcpServer, wasSendMessageCalled, resetSendFlag, getCurrentConversation: setConversationCallback } =
     createSdkMcpToolsFn(kernelClient, skillServiceManager);
 
   // Track last message for fallback reply routing
   let lastMessage: InboundMessage | null = null;
   let sessionId = "";
+
+  // Wire up auto-routing: update_progress reads channel/conversation from lastMessage
+  setConversationCallback(() => {
+    if (!lastMessage) return null;
+    return {
+      channel: lastMessage.channel,
+      conversationId: lastMessage.conversation.id,
+      lastMessageId: lastMessage.id,
+    };
+  });
+
+  // Typing indicator interval
+  let typingTimer: ReturnType<typeof setInterval> | null = null;
+
+  function startTyping(): void {
+    stopTyping();
+    if (!lastMessage) return;
+    const { channel, conversation } = lastMessage;
+    // Send immediately, then repeat every 4s
+    sendChatAction(skillServiceManager, channel, conversation.id, "typing");
+    typingTimer = setInterval(() => {
+      sendChatAction(skillServiceManager, channel, conversation.id, "typing");
+    }, TYPING_INTERVAL_MS);
+  }
+
+  function stopTyping(): void {
+    if (typingTimer) {
+      clearInterval(typingTimer);
+      typingTimer = null;
+    }
+  }
 
   // Wait for the first message before starting the SDK query
   const firstMsg = await injector.waitForMessage();
@@ -257,6 +307,7 @@ async function runSdkLoop(
   logger.info({ formatted: firstFormatted }, "SDK: received first message");
 
   await kernelClient.reportHealth(agentId, "busy").catch(() => {});
+  startTyping();
 
   // Create the message stream and seed with first message
   const stream = new MessageStream();
@@ -274,6 +325,7 @@ async function runSdkLoop(
         resetSendFlag(); // Reset flag for the new turn
         stream.push(formatted, sessionId);
         await kernelClient.reportHealth(agentId, "busy").catch(() => {});
+        startTyping();
       } catch (err) {
         logger.error({ err }, "SDK: message pump error");
         break;
@@ -341,6 +393,7 @@ async function runSdkLoop(
       }
 
       if (msg.type === "result") {
+        stopTyping();
         if (msg.subtype === "success") {
           sessionId = msg.session_id;
           logger.info(
@@ -411,6 +464,7 @@ async function runSdkLoop(
       }).catch(() => {});
     }
   } finally {
+    stopTyping();
     stream.end();
     try { q.close(); } catch { /* best effort */ }
   }

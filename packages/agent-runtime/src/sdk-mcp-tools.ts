@@ -7,18 +7,33 @@ import { z } from "zod/v4";
 import type { KernelClient } from "./kernel-client.js";
 import type { SkillServiceManager } from "./skill-service-manager.js";
 
+export interface ConversationInfo {
+  channel: string;
+  conversationId: string;
+  lastMessageId?: string;
+}
+
 /**
- * Create an SDK-native MCP server exposing CodeClaw's 5 tools.
+ * Create an SDK-native MCP server exposing CodeClaw's tools.
  *
  * Returns the server config (pass to `mcpServers` in query options)
- * plus a `wasSendMessageCalled()` accessor for the double-send guard.
+ * plus a `wasSendMessageCalled()` accessor for the double-send guard,
+ * and a `getCurrentConversation` setter for auto-routing in update_progress.
  */
 export function createSdkMcpTools(
   kernelClient: KernelClient,
   skillServiceManager: SkillServiceManager,
-): { server: McpSdkServerConfigWithInstance; wasSendMessageCalled: () => boolean; resetSendFlag: () => void } {
+): {
+  server: McpSdkServerConfigWithInstance;
+  wasSendMessageCalled: () => boolean;
+  resetSendFlag: () => void;
+  getCurrentConversation: (fn: () => ConversationInfo | null) => void;
+} {
   // Double-send guard: tracks whether send_message was invoked in the current turn
   let sentViaToolInTurn = false;
+
+  // Callback to resolve current conversation from agent-loop's lastMessage
+  let getConversation: (() => ConversationInfo | null) | null = null;
 
   const sendMessage = tool(
     "send_message",
@@ -126,15 +141,60 @@ export function createSdkMcpTools(
     },
   );
 
+  const updateProgress = tool(
+    "update_progress",
+    "Send or edit a progress message in the current conversation. Use for long-running tasks to keep the user informed. First call sends a new message and returns messageId; subsequent calls with messageId edit the existing message. Does NOT count as a final reply.",
+    {
+      text: z.string().describe("Progress text to show (e.g. '⏳ Analyzing your code...')"),
+      messageId: z.string().optional().describe("Message ID from a previous update_progress call. If provided, edits the existing message instead of sending a new one."),
+    },
+    // Note: does NOT set sentViaToolInTurn — progress is not a final reply
+    async ({ text, messageId }) => {
+      try {
+        const conv = getConversation?.();
+        if (!conv) {
+          return { content: [{ type: "text" as const, text: "No active conversation to send progress to" }], isError: true };
+        }
+        const { channel, conversationId, lastMessageId } = conv;
+
+        if (messageId) {
+          // Edit existing progress message
+          await kernelClient.sendMessage({
+            channel,
+            conversation: conversationId,
+            content: { type: "text", text },
+            editMessageId: messageId,
+          });
+          return { content: [{ type: "text" as const, text: JSON.stringify({ messageId }) }] };
+        } else {
+          // Send new progress message
+          const res = await kernelClient.sendMessage({
+            channel,
+            conversation: conversationId,
+            content: { type: "text", text },
+            replyTo: lastMessageId,
+            progress: true,
+          });
+          const newId = res.messageId ? String(res.messageId) : undefined;
+          return { content: [{ type: "text" as const, text: JSON.stringify({ messageId: newId }) }] };
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text" as const, text: `Failed: ${msg}` }], isError: true };
+      }
+    },
+  );
+
   const server = createSdkMcpServer({
     name: "codeclaw",
     version: "0.1.0",
-    tools: [sendMessage, skipReply, getQueueStatus, startSkillService, stopSkillService, listSkillServices],
+    tools: [sendMessage, skipReply, updateProgress, getQueueStatus, startSkillService, stopSkillService, listSkillServices],
   });
 
   return {
     server,
     wasSendMessageCalled: () => sentViaToolInTurn,
     resetSendFlag: () => { sentViaToolInTurn = false; },
+    getCurrentConversation: (fn: () => ConversationInfo | null) => { getConversation = fn; },
   };
 }

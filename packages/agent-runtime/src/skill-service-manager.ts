@@ -8,6 +8,7 @@ interface RunningService {
   command: string;
   args: string[];
   extraEnv: Record<string, string>;
+  port?: number;
   onRestart?: () => Promise<void>;
   startedAt: number;
   restartCount: number;
@@ -41,6 +42,7 @@ export class SkillServiceManager {
       command,
       args,
       extraEnv,
+      port: opts.port,
       onRestart: opts.onRestart,
       startedAt: Date.now(),
       restartCount: 0,
@@ -95,6 +97,13 @@ export class SkillServiceManager {
   /** Check if a skill service is running. */
   isRunning(skillId: string): boolean {
     return this.services.has(skillId);
+  }
+
+  /** Get the localhost endpoint for a running skill service, or null. */
+  getEndpoint(skillId: string): string | null {
+    const service = this.services.get(skillId);
+    if (!service?.port) return null;
+    return `http://localhost:${service.port}`;
   }
 
   /** Stop all services (for shutdown). */

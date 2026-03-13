@@ -43,12 +43,11 @@ export function createHttpServer(deps: ServerDeps) {
           throw new HttpError(400, "Missing required fields: channel, conversation, content");
         }
         try {
-          await ioBridge.routeOutbound(msg);
+          return await ioBridge.routeOutbound(msg);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           throw new HttpError(502, message);
         }
-        return { success: true };
       },
 
       "/api/services/register": async (body) => {

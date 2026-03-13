@@ -409,14 +409,20 @@ async function main() {
 
   // --- HTTP server: kernel sends outbound messages here ---
 
+  function sendJson(res: ServerResponse, status: number, data: unknown): void {
+    res.writeHead(status, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(data));
+  }
+
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (req.method === "POST" && req.url === "/send") {
       try {
         const body = await parseBody(req);
-        const { conversation, content, replyTo } = body as {
+        const { conversation, content, replyTo, progress } = body as {
           conversation: string;
           content: { type: string; text: string };
           replyTo?: string;
+          progress?: boolean;
         };
 
         if (content.type === "text") {
@@ -428,27 +434,59 @@ async function main() {
             if (!isNaN(parsed)) replyMsgId = parsed;
           }
 
-          await bot.api.sendMessage(conversation, content.text, {
+          const sent = await bot.api.sendMessage(conversation, content.text, {
             ...(replyMsgId ? { reply_parameters: { message_id: replyMsgId } } : {}),
           });
 
-          // Log outbound message to JSONL
-          appendToLog(conversation, {
-            id: `tg_${conversation}_out_${Date.now()}`,
-            ts: Date.now(),
-            sender: { id: "bot", name: "Agent" },
-            type: "text", text: content.text,
-            replyTo: replyTo ?? null,
-          });
+          // Skip JSONL for progress messages (ephemeral)
+          if (!progress) {
+            appendToLog(conversation, {
+              id: `tg_${conversation}_out_${Date.now()}`,
+              ts: Date.now(),
+              sender: { id: "bot", name: "Agent" },
+              type: "text", text: content.text,
+              replyTo: replyTo ?? null,
+            });
+          }
+
+          sendJson(res, 200, { success: true, messageId: sent.message_id });
+          return;
         }
 
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ success: true }));
+        sendJson(res, 200, { success: true });
       } catch (err) {
         console.error("[telegram] Failed to send outbound message:", err);
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: String(err) }));
+        sendJson(res, 500, { error: String(err) });
       }
+
+    } else if (req.method === "POST" && req.url === "/edit") {
+      try {
+        const body = await parseBody(req);
+        const { conversation, messageId, text } = body as {
+          conversation: string;
+          messageId: number;
+          text: string;
+        };
+        await bot.api.editMessageText(conversation, messageId, text);
+        sendJson(res, 200, { success: true });
+      } catch (err) {
+        console.error("[telegram] Failed to edit message:", err);
+        sendJson(res, 500, { error: String(err) });
+      }
+
+    } else if (req.method === "POST" && req.url === "/action") {
+      try {
+        const body = await parseBody(req);
+        const { conversation, action } = body as {
+          conversation: string;
+          action: string;
+        };
+        await bot.api.sendChatAction(conversation, action as any);
+      } catch {
+        // Chat action failures are silently ignored
+      }
+      sendJson(res, 200, { success: true });
+
     } else {
       res.writeHead(404);
       res.end("Not found");

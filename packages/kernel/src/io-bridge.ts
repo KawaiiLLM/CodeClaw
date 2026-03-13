@@ -59,25 +59,39 @@ export class IOBridge {
     return enqueued;
   }
 
-  /** Route an outbound message to the appropriate skill service. */
-  async routeOutbound(msg: OutboundMessage): Promise<void> {
+  /** Route an outbound message to the appropriate skill service. Returns the Skill's JSON response. */
+  async routeOutbound(msg: OutboundMessage): Promise<Record<string, unknown>> {
     const service = this.getServiceForChannel(msg.channel);
     if (!service) {
       throw new Error(`No skill service registered for channel: ${msg.channel}`);
     }
 
-    const url = `${service.endpoint}/send`;
-    logger.debug({ channel: msg.channel, conversation: msg.conversation, endpoint: url }, "Routing outbound message");
+    // Choose endpoint: /edit if editMessageId present, otherwise /send
+    const route = msg.editMessageId ? "/edit" : "/send";
+    const url = `${service.endpoint}${route}`;
+    logger.debug({ channel: msg.channel, conversation: msg.conversation, endpoint: url, route }, "Routing outbound message");
+
+    let payload: unknown;
+    if (msg.editMessageId) {
+      if (msg.content.type !== "text") {
+        throw new Error("editMessageId is only supported for text content");
+      }
+      payload = { conversation: msg.conversation, messageId: Number(msg.editMessageId), text: msg.content.text };
+    } else {
+      payload = msg;
+    }
 
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(msg),
+      body: JSON.stringify(payload),
     });
 
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`Skill service ${service.skillId} returned ${res.status}: ${body}`);
     }
+
+    return (await res.json()) as Record<string, unknown>;
   }
 }

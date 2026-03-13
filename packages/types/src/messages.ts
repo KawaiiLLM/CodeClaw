@@ -31,4 +31,6 @@ export interface OutboundMessage {
   conversation: string;
   content: MessageContent;
   replyTo?: string;
+  editMessageId?: string;
+  progress?: boolean;
 }

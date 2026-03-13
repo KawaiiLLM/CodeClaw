@@ -24,9 +24,10 @@ export class KernelClient {
     return res as unknown as InboundMessage;
   }
 
-  /** Send an outbound message through the kernel. */
-  async sendMessage(msg: OutboundMessage): Promise<void> {
-    await this.post("/api/messages/outbound", msg);
+  /** Send an outbound message through the kernel. Returns Skill response (e.g. messageId). */
+  async sendMessage(msg: OutboundMessage): Promise<{ messageId?: string } & Record<string, unknown>> {
+    const res = await this.post("/api/messages/outbound", msg);
+    return res as { messageId?: string } & Record<string, unknown>;
   }
 
   /** Get the current message queue status. */
