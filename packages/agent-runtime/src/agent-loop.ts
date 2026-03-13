@@ -352,18 +352,27 @@ async function runSdkLoop(
         } else {
           // Error result
           const errors = "errors" in msg ? msg.errors : [];
-          logger.error({ subtype: msg.subtype, errors }, "SDK: turn error");
+          const errorStr = errors.join("; ");
 
-          if (lastMessage) {
-            const errorText = errors.length > 0
-              ? `[Error] ${errors.join("; ")}`
-              : `[Error] Agent stopped: ${msg.subtype}`;
-            await kernelClient.sendMessage({
-              channel: lastMessage.channel,
-              conversation: lastMessage.conversation.id,
-              content: { type: "text", text: errorText },
-              replyTo: lastMessage.id,
-            }).catch(() => {});
+          // doExport 401 is a non-fatal SDK telemetry error (proxy key != real Anthropic key)
+          // SDK auto-recovers on next message, so just log and skip user notification
+          const isExportError = errorStr.includes("doExport") || errorStr.includes("AxiosError: Request failed with status code 401");
+          if (isExportError) {
+            logger.warn({ subtype: msg.subtype }, "SDK: suppressed doExport 401 (proxy key, non-fatal)");
+          } else {
+            logger.error({ subtype: msg.subtype, errors }, "SDK: turn error");
+
+            if (lastMessage) {
+              const errorText = errors.length > 0
+                ? `[Error] ${errorStr}`
+                : `[Error] Agent stopped: ${msg.subtype}`;
+              await kernelClient.sendMessage({
+                channel: lastMessage.channel,
+                conversation: lastMessage.conversation.id,
+                content: { type: "text", text: errorText },
+                replyTo: lastMessage.id,
+              }).catch(() => {});
+            }
           }
         }
 

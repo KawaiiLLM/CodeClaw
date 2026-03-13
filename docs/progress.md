@@ -156,7 +156,7 @@ Layer 2 — 进度消息（Agent 主动，有 token，经 Kernel）
 - 镜像: `codeclaw/agent-runtime:dev`
 
 ### API 代理
-- API Key: `sk-proxy-6d6c691839fc123f788e9f43de5a30c2`
+- API Key: `$ANTHROPIC_API_KEY`
 - Base URL: `https://proxy.moedb.moe`
 - Model: `aws-claude-opus-4-6`
 - 注意: Docker 容器内的 SDK/API 调用需要通过 HTTP_PROXY 访问
@@ -183,7 +183,7 @@ docker run -d --name codeclaw-agent-andy \
   -p 7001-7099:7001-7099 \
   -e KERNEL_URL=http://host.docker.internal:19000 \
   -e AGENT_ID=andy \
-  -e ANTHROPIC_API_KEY="sk-proxy-6d6c691839fc123f788e9f43de5a30c2" \
+  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   -e ANTHROPIC_BASE_URL="https://proxy.moedb.moe" \
   -e CLAUDE_MODEL="aws-claude-opus-4-6" \
   -e HTTP_PROXY="http://host.docker.internal:7890" \
