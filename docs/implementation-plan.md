@@ -652,102 +652,111 @@ cd packages/kernel && tsx src/index.ts
 ## Phase 5: 活跃状态 + 思考链流式输出
 
 > 设计方向 4 — Code-first UX: 看得见的思考
+>
+> 设计原则：框架是监督器，不是能力提供者。Chat action 是机械信号（框架自动做），进度消息是语义内容（Agent 自己决定）。
 
 ### 目标
-Agent 处理消息时，用户看到拟人化的活跃状态；执行复杂任务时，看到实时更新的思考过程。
+Agent 处理消息时，用户看到拟人化的活跃状态（零 token）；执行复杂任务时，Agent 主动展示有意义的进度（消耗 token 但信息密度高）。
 
-### 核心基础设施：Agent → Kernel → Skill 非消息通道
-
-Phase 5 的两个功能（chat action 和消息编辑）共用同一条管道：
+### 架构：两层信号，两条路径
 
 ```
-agent-loop.ts (拦截 SDK 事件)
-  → Kernel HTTP API (转发)
-    → Channel Skill HTTP 端点 (执行)
-      → Telegram API (sendChatAction / editMessageText)
+Layer 1 — Chat Action（自动，零 token，不经 Kernel）
+  agent-loop.ts 检测到 SDK 在处理
+    → 直接调 Skill /action (localhost:port)
+      → Telegram sendChatAction("typing")
+
+Layer 2 — 进度消息（Agent 主动，有 token，经 Kernel）
+  Agent 调用 update_progress MCP 工具
+    → Kernel POST /api/messages/outbound（走正常出站路径）
+      → Skill /edit (editMessageText) 或 /send (新建消息)
 ```
 
-### 5A: 拟人化 Chat Action（typing 等状态）
+**为什么 Chat Action 不经 Kernel**：Chat action 是纯表现层行为——不涉及消息路由、不需要队列、不需要去重。Kernel 的职责是"消息路由 + 进程监督"，chat action 两者都不是。Skill 运行在容器内同一网络，agent-loop 直接 `localhost:port` 可达。
 
-Agent 处理消息时自动发送 Telegram chat action，无需 Agent 主动调用，零 token 开销。
+**为什么进度消息经 Kernel**：进度消息是要发到通道的真实内容（只是会被编辑而非保留），走正常出站路径保持一致性。
 
-**工具类型 → chat action 映射**：
-| SDK 工具调用 | Telegram Action | 用户看到 |
-|---|---|---|
-| Read, Glob, Grep | `typing` | "正在输入..." |
-| Write, Edit | `typing` | "正在输入..." |
-| Bash | `typing` | "正在输入..." |
-| WebSearch, WebFetch | `find_location` | "正在搜索位置..." |
-| Agent (subagent) | `typing` | "正在输入..." |
-| send_message (图片) | `upload_photo` | "正在发送照片..." |
-| send_message (文件) | `upload_document` | "正在发送文件..." |
+### 5A: Chat Action（自动，零 token）
 
-> 映射表可后续调整，核心是不同操作给出不同的"人类感"反馈。
+agent-loop.ts 在 SDK 处理消息期间，周期性发送 `typing` 状态。不解析工具语义，只传达"Agent 在忙"的信号。
 
 **任务**：
 
-**5A.1 Kernel action 转发 API**
-- 新增 `POST /api/messages/action`
-- 消息格式：`{ channel, conversation, action }` （action = Telegram chat action 字符串）
-- Kernel 查找 channel 对应的 Skill，转发到 Skill 的 `/action` 端点
+**5A.1 agent-loop.ts 记录当前活跃会话**
+- 收到 inbound 消息时，记录 `lastConversation: { channel, conversationId }`
+- 这是 chat action 的发送目标
 
-**5A.2 Telegram Skill action 端点**
-- 新增 `POST /action` 端点
+**5A.2 agent-loop.ts 中 Skill endpoint 直连**
+- agent-loop 需要知道 Skill 的 localhost endpoint（从 `SkillServiceManager` 或 `index.ts` 传入 channel→endpoint 映射）
+- 在 SDK 消息流循环中，每收到一条 SDK 事件（`assistant`/`tool_use`/`tool_result`），触发一次 typing
+- 节流：同一 conversation 最多每 4 秒发一次（Telegram chat action 持续 5 秒）
+- 实现：`setInterval` 定时发送，在 `result` 消息到达时清除
+
+**5A.3 Telegram Skill `/action` 端点**
+- 新增 `POST /action` handler
+- body: `{ conversation: string, action: string }`
 - 调用 `bot.api.sendChatAction(conversation, action)`
-
-**5A.3 agent-loop.ts 自动拦截**
-- 在 `for await (const msg of q)` 中，拦截 `assistant` 类型消息
-- 检测 tool_use content block → 根据工具名查映射表 → 通过 kernelClient 发 action
-- 节流：同一 conversation 最多每 4 秒发一次（chat action 持续 5 秒）
+- 失败静默（chat action 丢了无影响）
 
 **验证**：
 - [ ] Agent 收到消息开始处理时，Telegram 显示 "正在输入..."
-- [ ] 不同工具调用显示不同状态
-- [ ] Agent 回复后状态自然消失
-- [ ] 零 token 开销（Agent 无感知）
+- [ ] Agent 回复后状态自然消失（interval 清除）
+- [ ] 零 token 开销（Agent 完全无感知）
+- [ ] Chat action 不经过 Kernel（检查 Kernel 日志无 action 相关请求）
 
-### 5B: 思考链流式消息编辑
+### 5B: 进度消息（Agent 主动）
 
-在 chat action 基础上，进一步通过 `editMessageText` 展示具体工具调用链：
+Agent 通过 `update_progress` MCP 工具主动报告有意义的进度，而非框架机械复述工具名。
 
+效果示例：
 ```
-🔍 正在读取 config.yaml...
+Agent: ⏳ 正在分析你发的代码...
+     → (编辑) ⏳ 找到了 3 个问题，正在修复...
+     → (编辑) ✅ 已修复，请看下面的 diff。
 ```
-→ 编辑为 →
-```
-🔍 读取了 config.yaml
-📝 正在修改端口配置...
-```
-→ 最终编辑为 →
-```
-✅ 已将端口从 3000 改为 8080，测试通过。
-```
+
+**为什么 Agent 决定而非框架提取**：
+- 框架提取工具名（"Read → config.yaml"）信息密度低，用户不关心 Agent 读了什么文件
+- Agent 自己知道在做什么（"分析你的代码"），能给出有意义的进度
+- 符合"框架是监督器，不替 Agent 做决策"原则
+- 代价是消耗少量 token，但 Agent 可选择不调用（简单任务不需要进度）
 
 **任务**：
 
-**5B.1 Kernel progress 转发 API**
-- 新增 `POST /api/messages/progress`
-- 消息格式：`{ channel, conversation, messageId?, text }` — 有 messageId 则编辑，无则新建
-- Kernel 转发给对应 Channel Skill
+**5B.1 Telegram Skill `/edit` 端点**
+- 新增 `POST /edit` handler
+- body: `{ conversation: string, messageId: number, text: string }`
+- 调用 `bot.api.editMessageText(conversation, messageId, text)`
+- 返回 `{ success: true }` 或 `{ error: string }`
 
-**5B.2 Telegram Skill 编辑消息端点**
-- 新增 `POST /edit` 端点
-- 调用 `bot.api.editMessageText(chatId, messageId, text)`
-- 返回 messageId 供后续编辑
+**5B.2 Kernel 出站路由扩展**
+- 现有 `POST /api/messages/outbound` 已支持 `{ channel, conversation, content }`
+- 扩展 `OutboundMessage` 增加可选字段：`editMessageId?: string`
+- IOBridge `routeOutbound` 转发时：有 `editMessageId` → 调 Skill `/edit`，无 → 调 `/send`（现有行为）
 
-**5B.3 SDK 事件流 → 进度提取**
-- 在 agent-loop.ts 中，拦截 `assistant` 类型消息
-- 提取工具调用名称和参数摘要，格式化为进度文本
-- 节流：最多 1 次/秒编辑（Telegram API 软限制）
+**5B.3 `update_progress` MCP 工具**
+- 在 `sdk-mcp-tools.ts` 新增工具
+- 参数：`{ channel: string, conversation: string, text: string, messageId?: string }`
+- 无 messageId → 调 `kernelClient.sendMessage` 发新消息 → 记录返回的 messageId
+- 有 messageId → 调 `kernelClient.sendMessage` 带 `editMessageId` → 编辑已有消息
+- 返回 `{ messageId: string }`（供后续编辑调用）
+- **不触发 double-send guard**（进度消息不是最终回复）
+- **不写入 JSONL**（瞬态进度，不是聊天记录）
 
-**5B.4 MCP 进度工具**
-- 在 `sdk-mcp-tools.ts` 新增 `update_progress` 工具
-- Agent 也可以主动报告进度（而不仅仅是自动提取）
+**5B.4 CLAUDE.md 进度指引**
+- 在 Agent 的 CLAUDE.md 中添加 `update_progress` 使用指引：
+  - 复杂任务（预计 >10s）开始时发一条进度
+  - 中间步骤有意义的进展时编辑更新
+  - 最终回复通过 `send_message` 发送（替代进度消息）
+  - 简单任务不需要进度（直接回复即可）
 
 **验证**：
-- [ ] Agent 执行多步工具调用时，Telegram 消息实时更新
-- [ ] 编辑频率不超过 1 次/秒
-- [ ] 最终消息替换为完整回复
+- [ ] Agent 执行复杂任务时，Telegram 出现进度消息并实时更新
+- [ ] 进度消息不写入 JSONL
+- [ ] 进度消息不触发 double-send guard
+- [ ] 最终回复正常发送
+- [ ] 编辑频率由 Agent 自控（无需框架节流）
+- [ ] Kernel 日志显示 outbound 带 editMessageId 时路由到 /edit
 
 ---
 
