@@ -196,7 +196,7 @@ export function createSdkMcpTools(
     {
       channel: z.string().describe("Target channel (e.g. 'telegram')"),
       conversation: z.string().describe("Conversation/chat ID"),
-      messageId: z.string().describe("Message ID (numeric)"),
+      messageId: z.string().describe("Platform message ID (msgId from notification header, NOT seq)"),
       emoji: z.string().describe("Emoji to react with. Must be supported by the target platform."),
       remove: z.boolean().optional().describe("If true, removes the reaction"),
     },
@@ -220,7 +220,7 @@ export function createSdkMcpTools(
     {
       channel: z.string().describe("Target channel"),
       conversation: z.string().describe("Conversation/chat ID"),
-      messageId: z.string().describe("Message ID to edit"),
+      messageId: z.string().describe("Platform message ID (msgId from notification header)"),
       text: z.string().describe("New text content"),
     },
     async ({ channel, conversation, messageId, text }) => {
@@ -239,7 +239,7 @@ export function createSdkMcpTools(
     {
       channel: z.string().describe("Target channel"),
       conversation: z.string().describe("Conversation/chat ID"),
-      messageId: z.string().describe("Message ID to delete"),
+      messageId: z.string().describe("Platform message ID (msgId from notification header)"),
     },
     async ({ channel, conversation, messageId }) => {
       try {

@@ -120,11 +120,12 @@ function buildNotificationHeader(
   chatId: string,
   senderName: string,
   seq: number,
+  tgMsgId: number,
   replyRef?: string,
 ): string {
   const date = todayStr();
   const replyTag = replyRef ? ` reply-to:${replyRef}` : "";
-  return `[telegram/${chatId}] ${senderName} (${date} seq:${seq}${replyTag}):\n  -> ~/.claude/data/telegram/${date}/${chatId}.jsonl`;
+  return `[telegram/${chatId}] ${senderName} (${date} seq:${seq} msgId:${tgMsgId}${replyTag}):\n  -> ~/.claude/data/telegram/${date}/${chatId}.jsonl`;
 }
 
 // --- ensureReplyPersisted ---
@@ -372,7 +373,7 @@ async function main() {
         text = text || "(empty)";
 
         seq = appendToLog(chatId, { ...logBase, type: "text", text: msg.text });
-        const header = buildNotificationHeader(chatId, sender.name, seq, replyRef);
+        const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyRef);
 
         if (text.length <= PREVIEW_LIMIT) {
           kernelContent = { type: "text", text: `${header}\n${text}` };
@@ -391,12 +392,12 @@ async function main() {
           const ext = mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
           const { relPath } = saveFile(chatId, `${tgMsgId}_photo.${ext}`, buf);
           seq = appendToLog(chatId, { ...logBase, type: "image", fileId: largest.file_id, path: relPath, caption: caption || null });
-          const header = buildNotificationHeader(chatId, sender.name, seq, replyRef);
+          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyRef);
           kernelContent = { type: "image", data: buf.toString("base64"), mimeType, caption: `${header}${caption ? `\n${caption}` : ""}` };
         } catch (err) {
           console.error("[telegram] Failed to download photo:", err);
           seq = appendToLog(chatId, { ...logBase, type: "image", fileId: largest.file_id, caption: caption || null });
-          const header = buildNotificationHeader(chatId, sender.name, seq, replyRef);
+          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyRef);
           kernelContent = { type: "text", text: `${header}\n[图片${caption ? `: ${caption}` : ""}]` };
         }
 
@@ -411,7 +412,7 @@ async function main() {
           const ext = sticker.is_animated ? "tgs" : sticker.is_video ? "webm" : "webp";
           const { relPath } = saveFile(chatId, `${tgMsgId}_sticker.${ext}`, buf);
           seq = appendToLog(chatId, { ...logBase, type: "sticker", fileId: sticker.file_id, path: relPath, emoji: sticker.emoji ?? null, setName: sticker.set_name ?? null });
-          const header = buildNotificationHeader(chatId, sender.name, seq, replyRef);
+          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyRef);
 
           if (isStatic) {
             kernelContent = { type: "image", data: buf.toString("base64"), mimeType: "image/webp", caption: `${header}\n[贴纸${emojiLabel}]` };
@@ -420,7 +421,7 @@ async function main() {
           }
         } catch {
           seq = appendToLog(chatId, { ...logBase, type: "sticker", fileId: sticker.file_id, emoji: sticker.emoji ?? null, setName: sticker.set_name ?? null });
-          const header = buildNotificationHeader(chatId, sender.name, seq, replyRef);
+          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyRef);
           kernelContent = { type: "text", text: `${header}\n[贴纸${emojiLabel}]` };
         }
 
@@ -434,11 +435,11 @@ async function main() {
           const { buf } = await downloadTelegramFile(doc.file_id);
           const { relPath } = saveFile(chatId, `${tgMsgId}_${fileName}`, buf);
           seq = appendToLog(chatId, { ...logBase, type: "file", filename: fileName, path: relPath, size: buf.length, mimeType: doc.mime_type ?? null, caption: caption || null });
-          const header = buildNotificationHeader(chatId, sender.name, seq, replyRef);
+          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyRef);
           kernelContent = { type: "text", text: `${header}\n[文件: ${fileName}, ${formatSize(buf.length)}${caption ? `, "${caption}"` : ""}]` };
         } catch {
           seq = appendToLog(chatId, { ...logBase, type: "file", filename: fileName, mimeType: doc.mime_type ?? null, caption: caption || null });
-          const header = buildNotificationHeader(chatId, sender.name, seq, replyRef);
+          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyRef);
           kernelContent = { type: "text", text: `${header}\n[文件: ${fileName}${caption ? `, "${caption}"` : ""}]` };
         }
 
@@ -454,12 +455,12 @@ async function main() {
         } catch {
           seq = appendToLog(chatId, { ...logBase, type: "audio", duration: audio.duration ?? null });
         }
-        const header = buildNotificationHeader(chatId, sender.name, seq!, replyRef);
+        const header = buildNotificationHeader(chatId, sender.name, seq!, tgMsgId, replyRef);
         kernelContent = { type: "text", text: `${header}\n[语音消息${durStr}]` };
 
       } else {
         seq = appendToLog(chatId, { ...logBase, type: "other" });
-        const header = buildNotificationHeader(chatId, sender.name, seq, replyRef);
+        const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyRef);
         kernelContent = { type: "text", text: `${header}\n[不支持的消息类型]` };
       }
     } catch (err) {
