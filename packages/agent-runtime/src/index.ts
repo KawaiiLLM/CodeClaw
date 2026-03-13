@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { KernelClient } from "./kernel-client.js";
 import { MessageInjector } from "./message-injector.js";
 import { SkillServiceManager } from "./skill-service-manager.js";
@@ -26,6 +28,28 @@ async function main() {
   };
   process.on("SIGTERM", () => void shutdown());
   process.on("SIGINT", () => void shutdown());
+
+  // Auto-start skills that have config files
+  const configDir = join(workspacePath, ".claude", "config");
+  const skillSources: Record<string, string> = {
+    telegram: "/codeclaw/skills/telegram/service.ts",
+  };
+  for (const [skillId, scriptPath] of Object.entries(skillSources)) {
+    const configPath = join(configDir, `${skillId}.json`);
+    if (existsSync(configPath) && existsSync(scriptPath)) {
+      try {
+        await skillServiceManager.start({
+          skillId,
+          command: "tsx",
+          args: [scriptPath],
+          env: { CONFIG_PATH: configPath },
+        });
+        logger.info({ skillId, configPath }, "Auto-started skill service");
+      } catch (err) {
+        logger.error({ skillId, err }, "Failed to auto-start skill service");
+      }
+    }
+  }
 
   // Start polling kernel for messages
   injector.start();

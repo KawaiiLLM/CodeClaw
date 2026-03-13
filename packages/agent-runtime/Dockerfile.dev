@@ -21,8 +21,9 @@ WORKDIR /codeclaw
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
 COPY packages/types/ packages/types/
 COPY packages/agent-runtime/ packages/agent-runtime/
+COPY skills/ skills/
 
-# Install pnpm and dependencies
+# Install pnpm and dependencies (includes skills)
 RUN npm install -g pnpm && pnpm config set registry https://registry.npmmirror.com && pnpm install --no-frozen-lockfile
 
 # Create non-root user with explicit UID (Claude Code SDK refuses bypassPermissions as root)

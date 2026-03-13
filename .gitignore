@@ -8,6 +8,10 @@ dist/
 
 # Secrets / config with tokens
 workspace-template/config/telegram.json
+workspace-template/.claude/config/telegram.json
+
+# Persistent agent home (contains secrets + runtime data)
+.agent-home/
 
 # Reference repos (too large for version control)
 nanoclaw/

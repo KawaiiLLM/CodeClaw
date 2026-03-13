@@ -23,7 +23,7 @@ interface TelegramConfig {
 const HOME = process.env.HOME ?? "/home/codeclaw";
 const CONFIG_PATH = process.env.CONFIG_PATH ?? `${HOME}/.claude/config/telegram.json`;
 const DATA_DIR = `${HOME}/.claude/data/telegram`;
-const KERNEL_URL = process.env.KERNEL_URL ?? "http://host.docker.internal:19000";
+const KERNEL_URL = process.env.KERNEL_URL ?? "http://localhost:19000";
 const SERVICE_PORT = parseInt(process.env.SERVICE_PORT ?? "7001", 10);
 const SKILL_ID = process.env.SKILL_ID ?? "telegram";
 
