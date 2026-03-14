@@ -47,7 +47,7 @@ export function createSdkMcpTools(
       conversation: z.string().describe("Conversation/chat ID"),
       text: z.string().describe("Message text to send"),
       replyTo: z.string().optional().describe("Message ID to reply to"),
-      listenMinutes: z.number().optional().describe("Minutes to listen for all group messages after sending (default 3, 0 to disable, max 1440)"),
+      listenMinutes: z.number().min(0).max(1440).optional().describe("Minutes to listen for all group messages after sending (default 3, 0 to disable)"),
     },
     async ({ channel, conversation, text, replyTo, listenMinutes }) => {
       try {
@@ -80,7 +80,6 @@ export function createSdkMcpTools(
       }
     },
   );
-
 
   const skipReply = tool(
     "skip_reply",

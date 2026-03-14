@@ -32,16 +32,14 @@ codeclaw/
 │       └── src/
 │           ├── index.ts            # 容器入口, 组装 + 信号处理
 │           ├── agent-loop.ts       # 核心: SDK/chat/stub 三层模式 + typing indicator
-│           ├── sdk-mcp-tools.ts    # SDK 原生 MCP server (14 工具 + double-send guard)
+│           ├── sdk-mcp-tools.ts    # SDK 原生 MCP server (10 工具 + double-send guard)
 │           ├── kernel-client.ts    # HTTP 客户端 (GET/POST kernel API, 返回 messageId)
 │           ├── message-injector.ts # 轮询内核 + waitForMessage()
-│           ├── mcp-server.ts       # MCP 工具独立实现 (chat 模式备用)
-│           ├── mcp-entry.ts        # MCP server 独立入口 (SDK 子进程用)
 │           ├── skill-service-manager.ts  # 子进程 Skill 生命周期 + getEndpoint()
 │           └── logger.ts
 ├── skills/
 │   └── telegram/
-│       ├── service.ts              # grammy bot + 9 HTTP 端点 + JSONL 持久化
+│       ├── service.ts              # grammy bot + 10 HTTP 端点 + JSONL 持久化
 │       ├── package.json            # grammy + undici
 │       ├── SKILL.md                # Agent 可读操作手册
 │       └── config.schema.json
@@ -73,7 +71,7 @@ Agent Runtime 运行在 Docker 容器内，职责是**驱动 Claude Agent 并与
 
 - **index.ts**: 容器入口，启动 SkillServiceManager 和 agent-loop，注册信号处理器。
 - **agent-loop.ts**: 系统核心。实现 SDK/chat/stub 三层模式（见下文），维护 typing indicator 的 setInterval，通过 `lastConversation` 状态支持 `update_progress` 工具的自动路由。
-- **sdk-mcp-tools.ts**: 以 SDK 原生 MCP server 方式提供 14 个 CodeClaw 工具，含闭包级 double-send guard（防止 MCP send 与 fallback result 重复发送）。
+- **sdk-mcp-tools.ts**: 以 SDK 原生 MCP server 方式提供 10 个 CodeClaw 工具，含闭包级 double-send guard（防止 MCP send 与 fallback result 重复发送）。
 - **kernel-client.ts**: 封装所有对内核 HTTP API 的调用，`sendMessage` 返回 `{ messageId? }` 供进度消息编辑使用。
 - **message-injector.ts**: 周期性轮询内核 `/api/messages/next`，通过 Promise resolve 机制将消息桥接为 `AsyncIterable<SDKUserMessage>`，null sentinel 关闭 stream。
 - **skill-service-manager.ts**: 扫描 `~/.claude/skills/*/manifest.json`，spawn Skill 子进程，动态分配端口，提供 `getEndpoint(skillId)` 供 agent-loop 直连 Skill（仅用于 chat action，不经 Kernel）。
@@ -113,7 +111,7 @@ Agent 调用 MCP 工具（send_message / update_progress）→ KernelClient POST
 
 ## Agent Loop 三层模式
 
-**SDK 模式**（最高优先）：使用 `@anthropic-ai/claude-agent-sdk` 的 `query()` API，提供完整 Claude Code 工具集（Bash/Read/Write/Edit/Glob/Grep 等）加 14 个 CodeClaw MCP 工具。通过 `persistSession: true` 支持跨重启的 session resume，`bypassPermissions` 模式运行（要求非 root 用户）。
+**SDK 模式**（最高优先）：使用 `@anthropic-ai/claude-agent-sdk` 的 `query()` API，提供完整 Claude Code 工具集（Bash/Read/Write/Edit/Glob/Grep 等）加 10 个 CodeClaw MCP 工具。通过 `persistSession: true` 支持跨重启的 session resume，`bypassPermissions` 模式运行（要求非 root 用户）。
 
 **Chat 模式**（降级方案）：SDK 不可用时，使用 `@anthropic-ai/sdk` 的 Messages API 进行纯文字对话，保留最近 50 条历史，支持自定义 base_url 和 HTTP 代理，含 3 次指数退避重试。
 

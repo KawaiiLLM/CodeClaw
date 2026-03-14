@@ -311,6 +311,7 @@ async function main() {
   }
 
   /** Watch map: chatId → expiry timestamp. Group messages are forwarded while watched. */
+  const DEFAULT_WATCH_MINUTES = 3;
   const watchMap = new Map<string, number>();
 
   function isWatched(chatId: string): boolean {
@@ -592,7 +593,7 @@ async function main() {
 
     // Auto-start watch window when directly addressed in group
     if (isGroup && isDirectlyAddressed(ctx)) {
-      watchMap.set(chatId, Date.now() + 3 * 60_000);
+      watchMap.set(chatId, Date.now() + DEFAULT_WATCH_MINUTES * 60_000);
     }
     if (!kernelContent) return;
 

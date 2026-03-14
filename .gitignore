@@ -16,3 +16,5 @@ workspace-template/.claude/config/telegram.json
 # Reference repos (too large for version control)
 nanoclaw/
 openclaw/
+tinyclaw/
+.DS_Store

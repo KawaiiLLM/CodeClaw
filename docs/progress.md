@@ -16,7 +16,7 @@
 | Phase 4: 端到端联调 | 完成 | SDK 模式全链路已验证 (Telegram → Agent SDK → Claude → Telegram) |
 | Phase 5a: Home 目录迁移 | 完成 | /workspace → /home/codeclaw, JSONL 聊天持久化 |
 | Phase 5: 活跃状态 + 进度消息 | 完成 | 两层信号架构: Chat Action (typing) + Progress Messages |
-| Phase 5b: Telegram 增强 | 完成 | JSONL 重构, 401 熔断器, 14 个 MCP 工具, 出站语义分流 |
+| Phase 5b: Telegram 增强 | 完成 | JSONL 重构, 401 熔断器, 10 个 MCP 工具, 出站语义分流 |
 | Phase 5c: 斜杠命令系统 | 完成 | 三层斜杠命令, 贴纸缓存, doExport 401 抑制 |
 | Phase 6: 安全约束与审批 | 待实现 | 白名单 + Emoji 审批 |
 
@@ -61,7 +61,7 @@ ea1c0d8 feat: manifest-based skill lifecycle with dynamic port allocation
 | M10: 进度消息 | 完成 | update_progress MCP 工具, 出站链路返回 messageId, /edit 端点 |
 | M11: JSONL 重构 | 完成 | date 目录 + seq ID, Skill-side 通知格式化, 引用消息持久化 |
 | M12: 401 熔断器 | 完成 | sendChatAction 指数退避 + 永久挂起, Grammy error_code 检测 |
-| M13: Rich Agent 工具 | 完成 | 14 个 MCP 工具: react/edit/delete/sticker/poll/get_message + 出站语义分流 |
+| M13: Rich Agent 工具 | 完成 | 10 个 MCP 工具: react/edit/delete/sticker/poll/get_message + 出站语义分流 |
 | M14: 架构边界清理 | 完成 | Agent Runtime 纯透传, Telegram 细节移至 SKILL.md |
 | M15: 斜杠命令系统 | 完成 | 三层斜杠命令 (Skill/Kernel/Agent), 自定义命令注册 |
 | M16: 贴纸缓存 | 完成 | 贴纸包本地缓存, 减少重复 API 调用 |
