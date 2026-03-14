@@ -676,8 +676,13 @@ async function main() {
         await bot.api.setMessageReaction(conversation, messageId, reaction as any);
         sendJson(res, 200, { success: true });
       } catch (err) {
-        console.error("[telegram] Failed to set reaction:", err);
-        sendJson(res, 500, { error: String(err) });
+        const errStr = String(err);
+        if (errStr.includes("REACTION_INVALID")) {
+          sendJson(res, 400, { error: `Unsupported Telegram reaction emoji. ${errStr}` });
+        } else {
+          console.error("[telegram] Failed to set reaction:", err);
+          sendJson(res, 500, { error: errStr });
+        }
       }
 
     } else if (req.method === "POST" && req.url === "/delete") {

@@ -6,27 +6,43 @@
 - Node.js 22+, pnpm
 - HTTP 代理 `127.0.0.1:7890` (大陆网络)
 
+## 环境变量
+
+| 变量 | 值 | 说明 |
+|------|----|------|
+| `DOCKER_HOST` | `unix:///Users/zhaoqixuan/.colima/default/docker.sock` | Colima socket 路径 |
+| `ANTHROPIC_API_KEY` | `sk-proxy-xxx` | API Key |
+| `ANTHROPIC_BASE_URL` | `https://proxy.moedb.moe` | API 代理 (大陆用) |
+| `CLAUDE_MODEL` | `aws-claude-opus-4-6` | 模型 ID |
+| `HTTP_PROXY` / `HTTPS_PROXY` | `http://host.docker.internal:7890` | 容器内代理 (外网访问) |
+| `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` | `1` | Bedrock 代理不支持实验性参数, 必须设置 |
+
+> Host 侧代理地址是 `127.0.0.1:7890`, 容器内必须用 `host.docker.internal:7890`.
+
 ## 一键启动
 
 ```bash
 # 0. 确保 Colima 运行
 colima start
 
-# 1. 构建 Docker 镜像
+# 1. 安装依赖
+pnpm install
+
+# 2. 构建 Docker 镜像
 DOCKER_HOST=unix://~/.colima/default/docker.sock \
   docker build -t codeclaw/agent-runtime:dev -f packages/agent-runtime/Dockerfile.dev .
 
-# 2. 启动 Kernel (host 进程)
+# 3. 启动 Kernel (host 进程, port 19000)
 npx tsx packages/kernel/src/index.ts &
 
-# 3. 启动 Agent 容器
+# 4. 启动 Agent 容器
 DOCKER_HOST=unix://~/.colima/default/docker.sock \
   docker run -d --name codeclaw-agent-andy \
   -v $(pwd)/.agent-home:/home/codeclaw \
-  -p 7001:7001 \
+  -p 7001-7099:7001-7099 \
   -e KERNEL_URL=http://host.docker.internal:19000 \
   -e AGENT_ID=andy \
-  -e ANTHROPIC_API_KEY="sk-proxy-xxx" \
+  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   -e ANTHROPIC_BASE_URL="https://proxy.moedb.moe" \
   -e CLAUDE_MODEL="aws-claude-opus-4-6" \
   -e HTTP_PROXY="http://host.docker.internal:7890" \
@@ -35,14 +51,14 @@ DOCKER_HOST=unix://~/.colima/default/docker.sock \
   -e CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
   codeclaw/agent-runtime:dev
 
-# 4. 验证
-curl -s http://localhost:19000/api/status | jq .  # Kernel 状态, services 应有 telegram
-DOCKER_HOST=unix://~/.colima/default/docker.sock docker logs -f codeclaw-agent-andy  # Agent 日志
+# 5. 验证
+curl -s http://localhost:19000/api/status | jq .
+DOCKER_HOST=unix://~/.colima/default/docker.sock docker logs -f codeclaw-agent-andy
 ```
 
-## 验证清单
+> Telegram Skill 由容器内 Agent 自动启动 (manifest-based), 无需手动启动. 端口 7001-7099 映射到 host 供 Kernel 回调.
 
-启动后逐项确认:
+## 验证清单
 
 | 检查项 | 命令 | 预期 |
 |--------|------|------|
@@ -60,7 +76,7 @@ DOCKER_HOST=unix://~/.colima/default/docker.sock docker stop codeclaw-agent-andy
 DOCKER_HOST=unix://~/.colima/default/docker.sock docker rm codeclaw-agent-andy
 DOCKER_HOST=unix://~/.colima/default/docker.sock \
   docker build -t codeclaw/agent-runtime:dev -f packages/agent-runtime/Dockerfile.dev .
-# 然后重复上面 step 3
+# 然后重复 step 4
 
 # 改了 Kernel 代码 → 重启 Kernel 进程
 kill $(lsof -ti :19000)
@@ -123,7 +139,7 @@ DOCKER_HOST=unix://~/.colima/default/docker.sock docker exec codeclaw-agent-andy
 
 **原因**: Kernel (host) 无法访问容器内 Skill 的端口.
 
-**修复**: docker run 时加 `-p 7001:7001`. Skill 注册的 `endpoint: http://localhost:7001` 从 host 视角必须可达.
+**修复**: docker run 时加 `-p 7001-7099:7001-7099`. Skill 注册的 `endpoint: http://localhost:7001` 从 host 视角必须可达.
 
 ### Kernel 代码过时
 
@@ -167,4 +183,4 @@ Kernel (:19000)  <---HTTP-->  Agent Runtime (SDK mode)
 
 - Kernel 是纯路由, 不解析消息语义
 - Agent 所有出站操作都经过 Kernel (`kernelClient.sendOutbound`)
-- Skill 端口必须映射到 host (`-p 7001:7001`), 否则 Kernel 无法回调
+- Skill 端口必须映射到 host (`-p 7001-7099:7001-7099`), 否则 Kernel 无法回调
