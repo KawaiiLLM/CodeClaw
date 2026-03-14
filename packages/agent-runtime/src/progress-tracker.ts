@@ -4,10 +4,9 @@ import { logger } from "./logger.js";
 
 /** Output tools — don't show in progress (message gets deleted on send anyway) */
 const HIDDEN_TOOLS = new Set([
-  "mcp__codeclaw__send_message",
-  "mcp__codeclaw__skip_reply",
-  "mcp__codeclaw__send_sticker",
-  "mcp__codeclaw__send_poll",
+  "mcp__telegram__send_message",
+  "mcp__telegram__send_sticker",
+  "mcp__telegram__send_poll",
 ]);
 
 const MAX_VISIBLE = 12;
@@ -382,19 +381,19 @@ function formatToolLabel(name: string, input: unknown): string {
       }
       return "WebFetch";
     }
-    case "mcp__codeclaw__react_message":
+    case "mcp__telegram__react_message":
       return inp?.emoji ? `React ${inp.emoji}` : "React";
-    case "mcp__codeclaw__edit_message":
+    case "mcp__telegram__edit_message":
       return "Edit message";
-    case "mcp__codeclaw__delete_message":
+    case "mcp__telegram__delete_message":
       return "Delete message";
-    case "mcp__codeclaw__get_sticker_set":
+    case "mcp__telegram__get_sticker_set":
       return inp?.name ? `Stickers: ${inp.name}` : "Stickers";
-    case "mcp__codeclaw__get_message":
+    case "mcp__telegram__get_message":
       return "Get message";
     default: {
-      if (name.startsWith("mcp__codeclaw__"))
-        return name.slice("mcp__codeclaw__".length);
+      if (name.startsWith("mcp__telegram__"))
+        return name.slice("mcp__telegram__".length);
       return name;
     }
   }
