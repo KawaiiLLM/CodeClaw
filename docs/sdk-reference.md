@@ -276,7 +276,7 @@ MCP 工具名遵循 `mcp__<server>__<tool>` 格式：
 ```typescript
 allowedTools: [
   "mcp__codeclaw__send_message",
-  "mcp__codeclaw__get_queue_status",
+  "mcp__codeclaw__update_progress",
 ]
 ```
 
