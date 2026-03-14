@@ -97,6 +97,37 @@ async function main() {
     }
   }
 
+  // Assemble MCP server configs from skill manifests (stdio transport)
+  const mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {};
+
+  if (existsSync(skillsDir)) {
+    const mcpEntries = readdirSync(skillsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() || e.isSymbolicLink());
+
+    for (const entry of mcpEntries) {
+      const manifestPath = join(skillsDir, entry.name, "manifest.json");
+      if (!existsSync(manifestPath)) continue;
+
+      try {
+        const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+        if (!manifest.mcpEntrypoint) continue;
+
+        const service = skillServiceManager.getEndpoint(manifest.skillId);
+        mcpServers[manifest.skillId] = {
+          command: extname(manifest.mcpEntrypoint) === ".ts" ? "tsx" : "node",
+          args: [manifest.mcpEntrypoint],
+          env: {
+            KERNEL_URL: kernelUrl,
+            ...(service ? { SKILL_ENDPOINT: service } : {}),
+          },
+        };
+        logger.info({ skillId: manifest.skillId, mcpEntrypoint: manifest.mcpEntrypoint }, "Registered MCP server from manifest");
+      } catch (err) {
+        logger.error({ err, manifestPath }, "Failed to read mcpEntrypoint from manifest");
+      }
+    }
+  }
+
   // Start polling kernel for messages
   injector.start();
 
@@ -108,6 +139,7 @@ async function main() {
       agentId,
       workspacePath,
       skillServiceManager,
+      mcpServers,
     });
   } catch (err) {
     logger.fatal({ err }, "Agent loop crashed");
