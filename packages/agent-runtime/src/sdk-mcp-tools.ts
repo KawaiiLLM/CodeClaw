@@ -257,7 +257,7 @@ export function createSdkMcpTools(
 
   const sendSticker = tool(
     "send_sticker",
-    "Send a Telegram sticker by fileId. Each sticker has a unique fileId obtained from get_sticker_set or from received sticker messages in chat logs (JSONL field: fileId). Sticker sets are identified by name (e.g. 'HotCherry').",
+    "Send a Telegram sticker by fileId. Get fileId from get_sticker_set or chat log JSONL.",
     {
       channel: z.string().describe("Target channel"),
       conversation: z.string().describe("Conversation/chat ID"),
@@ -282,7 +282,7 @@ export function createSdkMcpTools(
 
   const getStickerSet = tool(
     "get_sticker_set",
-    "Browse a Telegram sticker set by name. Returns paginated stickers with visual thumbnails (default 10, max 20). Internally queries the Telegram Skill directly (same container, no Kernel routing needed — this is a read-only lookup, not a message send). Static sticker thumbnails are cached on disk at ~/.claude/data/telegram/stickers/<setName>/<fileId>.webp — first call downloads from Telegram API, subsequent calls read from cache. Animated/video stickers have no thumbnail. Use the returned fileId with send_sticker to send one.",
+    "Browse a Telegram sticker set by name. Returns paginated stickers with thumbnails. Thumbnails cached at ~/.claude/data/telegram/stickers/. Use returned fileId with send_sticker.",
     {
       name: z.string().describe("Sticker set name (e.g. 'HotCherry')"),
       offset: z.number().optional().describe("Start index (default 0)"),

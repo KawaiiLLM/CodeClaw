@@ -10,7 +10,6 @@ async function main() {
   const agentId = process.env.AGENT_ID ?? "andy";
   const kernelUrl = process.env.KERNEL_URL ?? "http://localhost:19000";
   const workspacePath = process.env.HOME ?? "/home/codeclaw";
-  const resumeSessionId = process.env.RESUME_SESSION_ID;
 
   logger.info({ agentId, kernelUrl, workspacePath }, "CodeClaw Agent Runtime starting...");
 
@@ -39,7 +38,7 @@ async function main() {
 
   if (existsSync(skillsDir)) {
     const entries = readdirSync(skillsDir, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
+      .filter((e) => e.isDirectory() || e.isSymbolicLink())
       .sort((a, b) => a.name.localeCompare(b.name));
 
     for (const entry of entries) {
@@ -108,7 +107,6 @@ async function main() {
       kernelClient,
       agentId,
       workspacePath,
-      resumeSessionId,
       skillServiceManager,
     });
   } catch (err) {

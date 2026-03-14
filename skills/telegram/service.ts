@@ -373,6 +373,9 @@ async function main() {
           "  /model <name> — Switch model",
           "  /interrupt — Stop current task",
           "  /cost — Show accumulated API cost",
+          "  /session — List recent sessions",
+          "  /session new — Start fresh session",
+          "  /session <id> — Resume session by ID prefix",
           "",
           "SDK commands (routed to Claude Code):",
           "  /compact — Compress conversation context",
@@ -741,14 +744,15 @@ async function main() {
             isAnimated: s.is_animated ?? false,
             isVideo: s.is_video ?? false,
           };
-          if (!s.is_animated && !s.is_video) {
-            const cachePath = join(stickerCacheDir, `${s.file_id}.webp`);
+          // Static stickers: use thumbnail or full file; animated/video: use thumbnail only
+          const thumbFileId = s.thumbnail?.file_id ?? (!s.is_animated && !s.is_video ? s.file_id : null);
+          if (thumbFileId) {
+            const cachePath = join(stickerCacheDir, `${thumbFileId}.webp`);
             try {
               let buf: Buffer;
               if (existsSync(cachePath)) {
                 buf = readFileSync(cachePath);
               } else {
-                const thumbFileId = s.thumbnail?.file_id ?? s.file_id;
                 ({ buf } = await downloadTelegramFile(thumbFileId));
                 writeFileSync(cachePath, buf);
               }

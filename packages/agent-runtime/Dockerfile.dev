@@ -42,4 +42,11 @@ USER codeclaw
 
 # Start agent runtime with tsx
 # Copy CLAUDE.md to home on start (volume mount overrides build-time files)
-CMD ["sh", "-c", "cp -n /codeclaw/workspace-template/CLAUDE.md ~/CLAUDE.md 2>/dev/null; exec tsx /codeclaw/packages/agent-runtime/src/index.ts"]
+CMD ["sh", "-c", "\
+  cp -n /codeclaw/workspace-template/CLAUDE.md ~/CLAUDE.md 2>/dev/null; \
+  for skill in /codeclaw/skills/*/; do \
+    name=$(basename \"$skill\"); \
+    target=\"$HOME/.claude/skills/$name\"; \
+    if [ ! -L \"$target\" ]; then rm -rf \"$target\"; ln -s \"$skill\" \"$target\"; fi; \
+  done; \
+  exec tsx /codeclaw/packages/agent-runtime/src/index.ts"]

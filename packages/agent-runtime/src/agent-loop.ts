@@ -12,11 +12,13 @@ import { logger } from "./logger.js";
 
 let sdkAvailable = false;
 let sdkQuery: typeof import("@anthropic-ai/claude-agent-sdk").query;
+let sdkListSessions: typeof import("@anthropic-ai/claude-agent-sdk").listSessions;
 let createSdkMcpToolsFn: typeof import("./sdk-mcp-tools.js").createSdkMcpTools;
 
 try {
   const sdk = await import("@anthropic-ai/claude-agent-sdk");
   sdkQuery = sdk.query;
+  sdkListSessions = sdk.listSessions;
   const toolsMod = await import("./sdk-mcp-tools.js");
   createSdkMcpToolsFn = toolsMod.createSdkMcpTools;
   sdkAvailable = true;
@@ -80,6 +82,15 @@ function detectMode(): AgentMode {
   logger.info({ mode, sdkAvailable, hasKey }, "Agent mode detected");
   return mode;
 }
+
+// --- Session management types ---
+
+/** How to start the next SDK loop iteration. */
+type SessionAction =
+  | { type: "continue" }     // continue most recent session (default on startup)
+  | { type: "new" }          // start a fresh session
+  | { type: "resume"; sessionId: string }  // resume a specific session
+  | { type: "exit" };        // shut down
 
 // --- SDK mode: full Claude Code agent via Agent SDK ---
 
@@ -176,15 +187,18 @@ async function runSdkLoop(
   kernelClient: KernelClient,
   agentId: string,
   workspacePath: string,
-  resumeSessionId: string | undefined,
+  sessionConfig: SessionAction,
   skillServiceManager: SkillServiceManager,
-): Promise<void> {
+): Promise<SessionAction> {
   const model = process.env.CLAUDE_MODEL ?? "aws-claude-opus-4-6";
   const baseURL = process.env.ANTHROPIC_BASE_URL;
   const apiKey = process.env.ANTHROPIC_API_KEY!;
   const httpProxy = resolveProxy();
 
-  logger.info({ model, baseURL: baseURL ?? "(default)", workspacePath }, "Running in SDK mode");
+  logger.info({ model, baseURL: baseURL ?? "(default)", workspacePath, sessionConfig }, "Running in SDK mode");
+
+  // Session switch: set by handleRuntimeCommand, checked after interrupt causes result
+  let pendingAction: SessionAction | null = null;
 
   // Create MCP tools with double-send guard
   const { server: mcpServer, wasSendMessageCalled, resetSendFlag, getCurrentConversation: setConversationCallback, onMessageSent } =
@@ -266,7 +280,9 @@ async function runSdkLoop(
       stderr: (data: string) => {
         logger.warn({ stderr: data.trimEnd() }, "SDK: subprocess stderr");
       },
-      ...(resumeSessionId ? { resume: resumeSessionId } : {}),
+      ...(sessionConfig.type === "continue" ? { continue: true } : {}),
+      ...(sessionConfig.type === "resume" ? { resume: sessionConfig.sessionId } : {}),
+      // "new" and "exit" don't need special options (fresh session)
     },
   });
 
@@ -328,6 +344,97 @@ async function runSdkLoop(
         replyTo: msg.id,
       }).catch(() => {});
       return true;
+    }
+
+    if (cmd === "/session") {
+      if (!args) {
+        // List sessions
+        try {
+          const sessions = await sdkListSessions({ dir: process.env.HOME ?? workspacePath, limit: 10 });
+          if (sessions.length === 0) {
+            await kernelClient.sendMessage({
+              channel: msg.channel, conversation: msg.conversation.id,
+              content: { type: "text", text: "No sessions found." },
+              replyTo: msg.id,
+            }).catch(() => {});
+          } else {
+            const currentMark = (id: string) => id === sessionId ? " ← current" : "";
+            const lines = sessions.map((s, i) => {
+              const date = new Date(s.lastModified).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
+              const title = s.customTitle ?? s.summary ?? s.firstPrompt ?? "(untitled)";
+              const shortId = s.sessionId.slice(0, 8);
+              return `${i + 1}. \`${shortId}\` ${title} (${date})${currentMark(s.sessionId)}`;
+            });
+            await kernelClient.sendMessage({
+              channel: msg.channel, conversation: msg.conversation.id,
+              content: { type: "text", text: lines.join("\n") },
+              replyTo: msg.id,
+            }).catch(() => {});
+          }
+        } catch (err) {
+          await kernelClient.sendMessage({
+            channel: msg.channel, conversation: msg.conversation.id,
+            content: { type: "text", text: `Failed to list sessions: ${err instanceof Error ? err.message : String(err)}` },
+            replyTo: msg.id,
+          }).catch(() => {});
+        }
+        return true;
+      }
+
+      if (args === "new") {
+        // Start new session — interrupt current, restart with fresh session
+        pendingAction = { type: "new" };
+        await kernelClient.sendMessage({
+          channel: msg.channel, conversation: msg.conversation.id,
+          content: { type: "text", text: "Starting new session..." },
+          replyTo: msg.id,
+        }).catch(() => {});
+        try { await q.interrupt(); } catch { /* best effort */ }
+        return true;
+      }
+
+      // /session <id> — resume a specific session
+      // Match full UUID or prefix (at least 4 chars)
+      const targetId = args.trim();
+      if (targetId.length >= 4) {
+        try {
+          const sessions = await sdkListSessions({ dir: process.env.HOME ?? workspacePath });
+          const match = sessions.find((s) => s.sessionId.startsWith(targetId));
+          if (!match) {
+            await kernelClient.sendMessage({
+              channel: msg.channel, conversation: msg.conversation.id,
+              content: { type: "text", text: `No session found matching "${targetId}".` },
+              replyTo: msg.id,
+            }).catch(() => {});
+            return true;
+          }
+          if (match.sessionId === sessionId) {
+            await kernelClient.sendMessage({
+              channel: msg.channel, conversation: msg.conversation.id,
+              content: { type: "text", text: "Already in this session." },
+              replyTo: msg.id,
+            }).catch(() => {});
+            return true;
+          }
+          pendingAction = { type: "resume", sessionId: match.sessionId };
+          const title = match.customTitle ?? match.summary ?? match.firstPrompt ?? "(untitled)";
+          await kernelClient.sendMessage({
+            channel: msg.channel, conversation: msg.conversation.id,
+            content: { type: "text", text: `Resuming session: ${title}...` },
+            replyTo: msg.id,
+          }).catch(() => {});
+          try { await q.interrupt(); } catch { /* best effort */ }
+        } catch (err) {
+          await kernelClient.sendMessage({
+            channel: msg.channel, conversation: msg.conversation.id,
+            content: { type: "text", text: `Failed to switch session: ${err instanceof Error ? err.message : String(err)}` },
+            replyTo: msg.id,
+          }).catch(() => {});
+        }
+        return true;
+      }
+
+      return true; // Malformed /session arg, silently consume
     }
 
     // Not a runtime command — let it pass through to SDK
@@ -465,6 +572,13 @@ async function runSdkLoop(
         }
 
         resetSendFlag(); // Reset for next turn
+
+        // Check if a session switch was requested (set by /session command before interrupt)
+        if (pendingAction) {
+          logger.info({ pendingAction }, "SDK: session switch requested, breaking loop");
+          break;
+        }
+
         await kernelClient.reportHealth(agentId, "idle", { sessionId }).catch(() => {});
         continue;
       }
@@ -493,6 +607,9 @@ async function runSdkLoop(
     stream.end();
     try { q.close(); } catch { /* best effort */ }
   }
+
+  // Return the next action
+  return pendingAction ?? { type: "continue" };
 }
 
 // --- Chat mode: real Claude API via Anthropic SDK ---
@@ -675,10 +792,9 @@ export async function startAgentLoop(opts: {
   kernelClient: KernelClient;
   agentId: string;
   workspacePath: string;
-  resumeSessionId?: string;
   skillServiceManager: SkillServiceManager;
 }): Promise<void> {
-  const { injector, kernelClient, agentId, workspacePath, resumeSessionId, skillServiceManager } = opts;
+  const { injector, kernelClient, agentId, workspacePath, skillServiceManager } = opts;
 
   // Report initial health
   await kernelClient.reportHealth(agentId, "alive").catch(() => {});
@@ -696,7 +812,15 @@ export async function startAgentLoop(opts: {
     const mode = detectMode();
 
     if (mode === "sdk") {
-      await runSdkLoop(injector, kernelClient, agentId, workspacePath, resumeSessionId, skillServiceManager);
+      // Restartable SDK loop: each iteration is one session
+      let nextAction: SessionAction = { type: "continue" };
+      while (nextAction.type !== "exit") {
+        logger.info({ action: nextAction }, "SDK: starting session");
+        nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, nextAction, skillServiceManager);
+        if (nextAction.type !== "exit") {
+          logger.info({ nextAction }, "SDK: restarting with new session config");
+        }
+      }
     } else if (mode === "chat") {
       await runChatLoop(injector, kernelClient, agentId);
     } else {
