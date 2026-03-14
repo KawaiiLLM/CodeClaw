@@ -589,6 +589,11 @@ async function main() {
 
     // --- Group: only forward if directly addressed or watched ---
     if (isGroup && !isDirectlyAddressed(ctx) && !isWatched(chatId)) return;
+
+    // Auto-start watch window when directly addressed in group
+    if (isGroup && isDirectlyAddressed(ctx)) {
+      watchMap.set(chatId, Date.now() + 3 * 60_000);
+    }
     if (!kernelContent) return;
 
     // --- Forward standard InboundMessage to Kernel (no extra fields) ---
