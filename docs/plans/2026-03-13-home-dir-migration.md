@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript ESM, Docker, Node.js, Grammy (Telegram), Claude Agent SDK
 
-**设计哲学参考:** `docs/agent-system-design-philosophy.md` 第二章"文件系统即上下文"
+**设计哲学参考:** `docs/architecture.md` 第二章"文件系统即上下文"
 
 ---
 

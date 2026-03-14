@@ -939,7 +939,7 @@ pnpm build
 
 ## 十五、已知问题与设计权衡
 
-来自 `agent-system-design-philosophy.md` 的分析：
+来自 `architecture.md` 的分析：
 
 ### 15.1 Chat-first 的局限
 

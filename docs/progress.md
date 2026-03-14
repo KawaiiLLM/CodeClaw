@@ -76,3 +76,6 @@ ea1c0d8 feat: manifest-based skill lifecycle with dynamic port allocation
 3. **Chat 模式无工具**: chat 模式仍为纯文字对话, mcp-server.ts 未在 chat 模式中使用
 4. **Skill 安装体验**: 当前手动配置, 未实现通过自然语言安装
 5. **JSONL 同步写入**: `appendFileSync` 在高消息量下可能阻塞 event loop
+6. **容器镜像设计**: 基础镜像内容、Skill 依赖动态安装机制待规范
+7. **升级策略**: 内核升级时 home 目录兼容性、Skill 版本管理
+8. **Emoji 审批协议**: 审批消息格式、reaction 监听、超时策略 (Phase 6 前置设计)
