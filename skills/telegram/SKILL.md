@@ -9,12 +9,13 @@ Communicate with users via Telegram. Messages arrive with a `[telegram/<chatId>]
 
 ## MCP Tools
 
+Tools are provided by the `telegram` MCP server (prefix: `mcp__telegram__`).
+
 ### Messaging
 
 - `send_message` — Send text reply. Set `channel: "telegram"`, `conversation: "<chatId>"`.
 - `edit_message` — Edit a previously sent bot message by `messageId`.
 - `delete_message` — Delete a message (own messages, or others if bot is admin).
-- `skip_reply` — Acknowledge without replying (useful in group chats).
 
 ### Reactions
 
@@ -95,4 +96,4 @@ Format: `<date>/<chatId>/tgMsgId:<id>`. To resolve, use `get_message` with the p
 - You only receive messages that @mention you or reply to your messages.
 - Other messages are stored in the JSONL log but not forwarded.
 - Use `get_message` or grep the JSONL for prior context when needed.
-- Use `skip_reply` when a group message doesn't need a response.
+- If a group message doesn't need a response, simply do nothing — no tool call required.
