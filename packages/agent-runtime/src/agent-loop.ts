@@ -213,6 +213,9 @@ async function runSdkLoop(
   // Progress tracker: renders live tool chain in Telegram, mirrors CC's terminal UI
   const progressTracker = new ProgressTracker(kernelClient);
 
+  // Stop typing when progress message appears (typing becomes redundant)
+  progressTracker.onProgressStarted(() => stopTyping());
+
   // Stop typing + delete progress as soon as agent sends a reply
   onMessageSent(() => {
     stopTyping();
@@ -602,17 +605,8 @@ async function runSdkLoop(
             "SDK: turn completed",
           );
 
-          // Only auto-send result if send_message was NOT called by the agent
-          if (!wasSendMessageCalled() && msg.result && lastMessage) {
-            await kernelClient.sendMessage({
-              channel: lastMessage.channel,
-              conversation: lastMessage.conversation.id,
-              content: { type: "text", text: msg.result },
-              replyTo: lastMessage.id,
-            }).catch((err) => {
-              logger.error({ err }, "SDK: failed to send fallback result");
-            });
-          }
+          // No fallback auto-send: agent must use send_message to reply.
+          // This prevents internal SDK state from leaking to chat.
         } else {
           // Error result
           const errors = "errors" in msg ? msg.errors : [];

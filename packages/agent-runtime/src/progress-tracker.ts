@@ -11,7 +11,9 @@ const HIDDEN_TOOLS = new Set([
 ]);
 
 const MAX_VISIBLE = 12;
-const MIN_EDIT_INTERVAL_MS = 3000;
+const MIN_EDIT_INTERVAL_MS = 5000;
+/** Don't show progress until tools have been running for this long */
+const GRACE_PERIOD_MS = 30_000;
 
 interface ToolEntry {
   id: string;
@@ -52,7 +54,22 @@ export class ProgressTracker {
   private replyToId?: string;
   private targetLocked = false;
 
+  /** Timestamp of first tool start — used for grace period */
+  private firstToolTime: number | null = null;
+
+  /** Consecutive edit failures — backs off to avoid 429 cascade */
+  private consecutiveFailures = 0;
+  private static readonly MAX_BACKOFF_MS = 30_000;
+
+  /** Called when the first progress message is created (e.g. to stop typing) */
+  private progressStartedCallback: (() => void) | null = null;
+
   constructor(private kernelClient: KernelClient) {}
+
+  /** Register a callback for when the first progress message is created. */
+  onProgressStarted(fn: () => void): void {
+    this.progressStartedCallback = fn;
+  }
 
   /**
    * Set the target conversation for the progress message.
@@ -69,6 +86,7 @@ export class ProgressTracker {
   onToolStarted(id: string, name: string): void {
     if (HIDDEN_TOOLS.has(name)) return;
     if (this.entries.some((e) => e.id === id)) return;
+    if (!this.firstToolTime) this.firstToolTime = Date.now();
     this.entries.push({
       id,
       name,
@@ -174,6 +192,8 @@ export class ProgressTracker {
     this.blinkState = false;
     this.pendingEdit = false;
     this.targetLocked = false;
+    this.firstToolTime = null;
+    this.consecutiveFailures = 0;
   }
 
   get hasEntries(): boolean {
@@ -252,15 +272,35 @@ export class ProgressTracker {
   private scheduleEdit(): void {
     this.pendingEdit = true;
     const now = Date.now();
+
+    // Grace period: don't show progress until tools have been running for 30s
+    if (!this.messageId && this.firstToolTime) {
+      const graceRemaining = GRACE_PERIOD_MS - (now - this.firstToolTime);
+      if (graceRemaining > 0) {
+        if (!this.editTimer) {
+          this.editTimer = setTimeout(() => {
+            this.editTimer = null;
+            if (this.pendingEdit) this.doEdit().catch(() => {});
+          }, graceRemaining);
+        }
+        return;
+      }
+    }
+
+    // Exponential backoff on consecutive failures (e.g. Telegram 429)
+    const backoffMs = this.consecutiveFailures > 0
+      ? Math.min(MIN_EDIT_INTERVAL_MS * 2 ** this.consecutiveFailures, ProgressTracker.MAX_BACKOFF_MS)
+      : MIN_EDIT_INTERVAL_MS;
+
     const elapsed = now - this.lastEditTime;
 
-    if (elapsed >= MIN_EDIT_INTERVAL_MS) {
+    if (elapsed >= backoffMs) {
       this.doEdit().catch(() => {});
     } else if (!this.editTimer) {
       this.editTimer = setTimeout(() => {
         this.editTimer = null;
         if (this.pendingEdit) this.doEdit().catch(() => {});
-      }, MIN_EDIT_INTERVAL_MS - elapsed);
+      }, backoffMs - elapsed);
     }
   }
 
@@ -293,9 +333,18 @@ export class ProgressTracker {
           progress: true,
         });
         this.messageId = res.messageId ? String(res.messageId) : null;
+        // Notify agent-loop to stop typing (progress message replaces typing indicator)
+        if (this.messageId) {
+          this.progressStartedCallback?.();
+        }
       }
+      this.consecutiveFailures = 0;
     } catch (err) {
-      logger.debug({ err }, "ProgressTracker: failed to send/edit progress");
+      this.consecutiveFailures++;
+      logger.debug(
+        { err, failures: this.consecutiveFailures },
+        "ProgressTracker: failed to send/edit progress",
+      );
     }
   }
 }
