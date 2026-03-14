@@ -222,7 +222,7 @@ async function runSdkLoop(
     progressTracker.cleanup().catch(() => {});
   });
 
-  // Wire up auto-routing: update_progress reads channel/conversation from lastMessage
+  // Wire up conversation callback for MCP tools that need current conversation context
   setConversationCallback(() => {
     if (!lastMessage) return null;
     return {

@@ -72,7 +72,7 @@ Agent Runtime 运行在 Docker 容器内，职责是**驱动 Claude Agent 并与
 - **index.ts**: 容器入口，启动 SkillServiceManager 和 agent-loop，注册信号处理器。
 - **agent-loop.ts**: 系统核心。实现 SDK/chat/stub 三层模式（见下文），维护 typing indicator 的 setInterval，通过 ProgressTracker 拦截 SDK 事件流自动展示工具调用链进度。
 - **sdk-mcp-tools.ts**: 以 SDK 原生 MCP server 方式提供 9 个 CodeClaw 工具，含闭包级 double-send guard（防止 MCP send 与 fallback result 重复发送）。
-        - **progress-tracker.ts**: 拦截 SDK 事件流（stream_event/tool_progress/task 事件），自动渲染工具调用链进度消息，含编辑节流和闪烁光标效果。
+- **progress-tracker.ts**: 拦截 SDK 事件流（stream_event/tool_progress/task 事件），自动渲染工具调用链进度消息，含编辑节流和闪烁光标效果。
 - **kernel-client.ts**: 封装所有对内核 HTTP API 的调用，`sendMessage` 返回 `{ messageId? }` 供进度消息编辑使用。
 - **message-injector.ts**: 周期性轮询内核 `/api/messages/next`，通过 Promise resolve 机制将消息桥接为 `AsyncIterable<SDKUserMessage>`，null sentinel 关闭 stream。
 - **skill-service-manager.ts**: 扫描 `~/.claude/skills/*/manifest.json`，spawn Skill 子进程，动态分配端口，提供 `getEndpoint(skillId)` 供 agent-loop 直连 Skill（仅用于 chat action，不经 Kernel）。

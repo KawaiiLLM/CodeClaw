@@ -190,14 +190,11 @@ export class ProgressTracker {
     this.entries = [];
     this.subAgents.clear();
     this.blinkState = false;
+    this.lastEditTime = 0;
     this.pendingEdit = false;
     this.targetLocked = false;
     this.firstToolTime = null;
     this.consecutiveFailures = 0;
-  }
-
-  get hasEntries(): boolean {
-    return this.entries.length > 0 || this.subAgents.size > 0;
   }
 
   // --- Rendering ---
@@ -307,9 +304,9 @@ export class ProgressTracker {
   private async doEdit(): Promise<void> {
     this.pendingEdit = false;
     this.blinkState = !this.blinkState;
-    this.lastEditTime = Date.now();
 
     if (!this.channel || !this.conversationId) return;
+    this.lastEditTime = Date.now();
 
     const text = this.render();
 
