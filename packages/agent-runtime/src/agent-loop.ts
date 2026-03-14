@@ -180,6 +180,9 @@ function sendChatAction(
 
 const TYPING_INTERVAL_MS = 4000;
 
+/** MCP tools that send a visible reply — stop typing when detected in event stream */
+const SEND_TOOLS = new Set(["mcp__telegram__send_message", "mcp__telegram__send_sticker", "mcp__telegram__send_poll"]);
+
 async function runSdkLoop(
   injector: MessageInjector,
   kernelClient: KernelClient,
@@ -534,7 +537,6 @@ async function runSdkLoop(
             progressTracker.onToolStarted(block.id, block.name);
 
             // Stop typing + clear progress when agent calls a send-type tool
-            const SEND_TOOLS = new Set(["mcp__telegram__send_message", "mcp__telegram__send_sticker", "mcp__telegram__send_poll"]);
             if (SEND_TOOLS.has(block.name)) {
               stopTyping();
               progressTracker.cleanup().catch(() => {});

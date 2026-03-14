@@ -275,8 +275,8 @@ MCP 工具名遵循 `mcp__<server>__<tool>` 格式：
 
 ```typescript
 allowedTools: [
-  "mcp__codeclaw__send_message",
-  "mcp__codeclaw__update_progress",
+  "mcp__telegram__send_message",
+  "mcp__telegram__react_message",
 ]
 ```
 

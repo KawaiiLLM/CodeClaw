@@ -70,8 +70,7 @@ codeclaw/
 
 Agent Runtime 运行在 Docker 容器内，职责是**驱动 Claude Agent 并与内核通信**。它是纯粹的执行层，不解析 Telegram 等平台细节。
 
-- **index.ts**: 容器入口，启动 SkillServiceManager 和 agent-loop，注册信号处理器。
-- **index.ts**: 容器入口，启动 SkillServiceManager，扫描 `manifest.json` 中的 `mcpEntrypoint` 组装 `McpStdioServerConfig`，传给 agent-loop。
+- **index.ts**: 容器入口，启动 SkillServiceManager，扫描 `manifest.json` 中的 `mcpEntrypoint` 组装 `McpStdioServerConfig`，传给 agent-loop，注册信号处理器。
 - **agent-loop.ts**: 系统核心。实现 SDK/chat/stub 三层模式（见下文），维护 typing indicator 的 setInterval，通过事件流检测 send 类 MCP 工具调用来停止 typing，通过 ProgressTracker 拦截 SDK 事件流自动展示工具调用链进度。MCP 工具通过 stdio 外部进程提供，Runtime 本身不持有任何工具定义。
 - **progress-tracker.ts**: 拦截 SDK 事件流（stream_event/tool_progress/task 事件），自动渲染工具调用链进度消息，含编辑节流和闪烁光标效果。
 - **kernel-client.ts**: 封装所有对内核 HTTP API 的调用，`sendMessage` 返回 `{ messageId? }` 供进度消息编辑使用。
