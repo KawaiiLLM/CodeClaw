@@ -33,10 +33,6 @@ Communicate with users via Telegram. Messages arrive with a `[telegram/<chatId>]
 
 - `get_message` — Fetch a specific historical message by `date` + `seq` or `platformMessageId`.
 
-### Progress
-
-- `update_progress` — Show/update a progress indicator for long tasks. Does not count as a reply.
-
 ## Chat History
 
 Messages are persisted in `~/.claude/data/telegram/` by date.

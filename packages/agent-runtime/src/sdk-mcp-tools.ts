@@ -18,7 +18,7 @@ export interface ConversationInfo {
  *
  * Returns the server config (pass to `mcpServers` in query options)
  * plus a `wasSendMessageCalled()` accessor for the double-send guard,
- * and a `getCurrentConversation` setter for auto-routing in update_progress.
+ * and a `getCurrentConversation` setter for auto-routing (e.g. get_sticker_set typing action).
  */
 export function createSdkMcpTools(
   kernelClient: KernelClient,
@@ -88,50 +88,6 @@ export function createSdkMcpTools(
     async () => {
       sentViaToolInTurn = true;
       return { content: [{ type: "text" as const, text: "Reply skipped" }] };
-    },
-  );
-
-  const updateProgress = tool(
-    "update_progress",
-    "Send or edit a progress message in the current conversation. Use for long-running tasks to keep the user informed. First call sends a new message and returns messageId; subsequent calls with messageId edit the existing message. Does NOT count as a final reply.",
-    {
-      text: z.string().describe("Progress text to show (e.g. '⏳ Analyzing your code...')"),
-      messageId: z.string().optional().describe("Message ID from a previous update_progress call. If provided, edits the existing message instead of sending a new one."),
-    },
-    // Note: does NOT set sentViaToolInTurn — progress is not a final reply
-    async ({ text, messageId }) => {
-      try {
-        const conv = getConversation?.();
-        if (!conv) {
-          return { content: [{ type: "text" as const, text: "No active conversation to send progress to" }], isError: true };
-        }
-        const { channel, conversationId, lastMessageId } = conv;
-
-        if (messageId) {
-          // Edit existing progress message
-          await kernelClient.sendMessage({
-            channel,
-            conversation: conversationId,
-            content: { type: "text", text },
-            editMessageId: messageId,
-          });
-          return { content: [{ type: "text" as const, text: JSON.stringify({ messageId }) }] };
-        } else {
-          // Send new progress message
-          const res = await kernelClient.sendMessage({
-            channel,
-            conversation: conversationId,
-            content: { type: "text", text },
-            replyTo: lastMessageId,
-            progress: true,
-          });
-          const newId = res.messageId ? String(res.messageId) : undefined;
-          return { content: [{ type: "text" as const, text: JSON.stringify({ messageId: newId }) }] };
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: "text" as const, text: `Failed: ${msg}` }], isError: true };
-      }
     },
   );
 
@@ -369,7 +325,7 @@ export function createSdkMcpTools(
     name: "codeclaw",
     version: "0.1.0",
     tools: [
-      sendMessage, skipReply, updateProgress,
+      sendMessage, skipReply,
       reactMessage, editMessage, deleteMessage,
       sendSticker, getStickerSet, sendPoll, getMessage,
     ],
