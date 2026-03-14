@@ -398,7 +398,7 @@ async function runSdkLoop(
       const targetId = args.trim();
       if (targetId.length >= 4) {
         try {
-          const sessions = await sdkListSessions({ dir: process.env.HOME ?? workspacePath });
+          const sessions = await sdkListSessions({ dir: process.env.HOME ?? workspacePath, limit: 100 });
           const match = sessions.find((s) => s.sessionId.startsWith(targetId));
           if (!match) {
             await kernelClient.sendMessage({
@@ -434,7 +434,13 @@ async function runSdkLoop(
         return true;
       }
 
-      return true; // Malformed /session arg, silently consume
+      // Prefix too short
+      await kernelClient.sendMessage({
+        channel: msg.channel, conversation: msg.conversation.id,
+        content: { type: "text", text: "Session ID prefix must be at least 4 characters." },
+        replyTo: msg.id,
+      }).catch(() => {});
+      return true;
     }
 
     // Not a runtime command — let it pass through to SDK
@@ -460,10 +466,16 @@ async function runSdkLoop(
   resetSendFlag();
 
   // Background coroutine: continuously read from injector and push to stream
+  let pumpStopped = false;
   const pumpMessages = async () => {
-    while (true) {
+    while (!pumpStopped) {
       try {
         const msg = await injector.waitForMessage();
+        if (pumpStopped) {
+          // Session switched while we were waiting — re-queue so next loop picks it up
+          injector.push(msg);
+          break;
+        }
         lastMessage = msg;
 
         // Check for runtime commands
@@ -604,6 +616,7 @@ async function runSdkLoop(
     }
   } finally {
     stopTyping();
+    pumpStopped = true;
     stream.end();
     try { q.close(); } catch { /* best effort */ }
   }
