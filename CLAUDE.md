@@ -38,6 +38,13 @@ Unix 微内核式个人 AI Agent 系统：Kernel (host) + Agent (Docker) + Skill
 - **API 代理**: base_url=`https://proxy.moedb.moe`, model=`aws-claude-opus-4-6`
 - **镜像源**: Dockerfile 用 USTC debian mirror + npmmirror（不在构建时配代理）
 
+## 部署操作规范
+- **Docker volume 是持久数据**：重建容器时必须复用同名 named volume（`codeclaw-andy-home`），绝不能删除或更换 volume name。Volume 中存储 session 文件、配置、聊天记录等不可恢复的数据。
+- **部署前确认 volume**：`docker volume ls | grep andy` 确认 volume 存在，`docker run` 时使用 `-v codeclaw-andy-home:/home/codeclaw`。
+- **端口映射**：容器必须 `-p 7001:7001`，否则 Kernel (host) 无法回调容器内的 Telegram Skill。
+- **API Key**：通过 `-e ANTHROPIC_API_KEY=...` 传入，不存储在文件中。
+- **禁用实验性 beta**：容器启动必须设 `-e CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`，避免 SDK 启用不稳定功能。
+
 ## 开发约定
 - pnpm workspace monorepo, TypeScript ESM
 - 中文交流
