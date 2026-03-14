@@ -267,7 +267,7 @@ async function runSdkLoop(
         preset: "claude_code",
         append: SDK_SYSTEM_APPEND,
       },
-      settingSources: ["project"],
+      settingSources: ["user", "project"],
       model,
       cwd: process.env.HOME ?? workspacePath,
       env,
