@@ -1,7 +1,7 @@
 # CodeClaw 实现进度记录
 
 > 最后更新: 2026-03-14
-> 最新提交: `0c2d8a5` feat: three-layer slash command system + sticker cache + doExport suppression
+> 最新提交: `5b0fe42` feat: runtime-level progress display replacing agent-driven update_progress
 
 ---
 
@@ -15,7 +15,7 @@
 | Phase 3: Telegram Skill | 完成 | grammy + 代理 + 图片/贴纸 + 群聊@过滤 |
 | Phase 4: 端到端联调 | 完成 | SDK 模式全链路已验证 (Telegram → Agent SDK → Claude → Telegram) |
 | Phase 5a: Home 目录迁移 | 完成 | /workspace → /home/codeclaw, JSONL 聊天持久化 |
-| Phase 5: 活跃状态 + 进度消息 | 完成 | 两层信号架构: Chat Action (typing) + Progress Messages |
+| Phase 5: 活跃状态 + 进度消息 | 完成 | 两层信号架构: Chat Action (typing) + Runtime ProgressTracker |
 | Phase 5b: Telegram 增强 | 完成 | JSONL 重构, 401 熔断器, 10 个 MCP 工具, 出站语义分流 |
 | Phase 5c: 斜杠命令系统 | 完成 | 三层斜杠命令, 贴纸缓存, doExport 401 抑制 |
 | Phase 6: 安全约束与审批 | 待实现 | 白名单 + Emoji 审批 |
@@ -25,6 +25,12 @@
 ## 提交历史
 
 ```
+5b0fe42 feat: runtime-level progress display replacing agent-driven update_progress
+76109dd fix: code review — 修复过时文档引用 + 删除未使用的 mcp-server
+2338ed4 fix: @mention 时立即开启群消息监听窗口
+a45222e feat: group chat listen window — send_message 自动开启群消息监听
+b868c65 refactor: Agent CLAUDE.md 转向行为哲学 + 同步清理已删工具引用
+4aa612d refactor: 精简设计哲学 + MCP 工具瘦身 (14→10)
 0c2d8a5 feat: three-layer slash command system + sticker cache + doExport suppression
 a3e3b04 fix: remove leaked API key from docs, suppress SDK doExport 401
 4da9d12 fix: expose tgMsgId in notification header, clarify tool messageId
@@ -58,14 +64,17 @@ ea1c0d8 feat: manifest-based skill lifecycle with dynamic port allocation
 | M7: 群聊 @提及过滤 | 完成 | 群聊仅在 @bot 或回复 bot 时响应 |
 | M8: Home 目录迁移 | 完成 | /workspace → /home/codeclaw, JSONL 聊天持久化 |
 | M9: Typing 指示器 | 完成 | 处理消息时 Telegram 显示"正在输入...", 回复后立即停止 |
-| M10: 进度消息 | 完成 | update_progress MCP 工具, 出站链路返回 messageId, /edit 端点 |
+| M10: 进度消息 | 完成 | Runtime ProgressTracker 自动展示工具调用链, 零 token 成本 |
 | M11: JSONL 重构 | 完成 | date 目录 + seq ID, Skill-side 通知格式化, 引用消息持久化 |
 | M12: 401 熔断器 | 完成 | sendChatAction 指数退避 + 永久挂起, Grammy error_code 检测 |
-| M13: Rich Agent 工具 | 完成 | 10 个 MCP 工具: react/edit/delete/sticker/poll/get_message + 出站语义分流 |
+| M13: Rich Agent 工具 | 完成 | 9 个 MCP 工具: react/edit/delete/sticker/poll/get_message + 出站语义分流 |
 | M14: 架构边界清理 | 完成 | Agent Runtime 纯透传, Telegram 细节移至 SKILL.md |
 | M15: 斜杠命令系统 | 完成 | 三层斜杠命令 (Skill/Kernel/Agent), 自定义命令注册 |
 | M16: 贴纸缓存 | 完成 | 贴纸包本地缓存, 减少重复 API 调用 |
 | M17: doExport 401 抑制 | 完成 | SDK doExport 请求 401 错误静默处理, 不中断 Agent loop |
+| M18: 工具瘦身 | 完成 | 14→9 MCP 工具, 移除 Skill 管理工具 + update_progress |
+| M19: 群消息监听窗口 | 完成 | send_message 自动开启群消息监听 (默认 3 分钟) |
+| M20: Runtime 进度显示 | 完成 | ProgressTracker 拦截 SDK 事件流, CC 风格工具调用链, 零 token |
 
 ---
 
