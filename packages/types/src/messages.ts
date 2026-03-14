@@ -24,6 +24,8 @@ export interface InboundMessage {
   content: MessageContent;
   timestamp: number;
   replyTo?: string;
+  /** Optional metadata for cross-layer communication (e.g. command routing). */
+  metadata?: Record<string, unknown>;
 }
 
 export interface OutboundMessage {

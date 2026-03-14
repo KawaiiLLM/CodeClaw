@@ -193,6 +193,7 @@ async function runSdkLoop(
   // Track last message for fallback reply routing
   let lastMessage: InboundMessage | null = null;
   let sessionId = "";
+  let cumulativeCost = 0;
 
   // Stop typing as soon as agent sends a reply (don't wait for SDK result event)
   onMessageSent(() => stopTyping());
@@ -228,43 +229,8 @@ async function runSdkLoop(
     }
   }
 
-  // Wait for the first message before starting the SDK query
-  const firstMsg = await injector.waitForMessage();
-  lastMessage = firstMsg;
-  const firstFormatted = await formatMessageForAgent(firstMsg);
-  logger.info({ formatted: firstFormatted }, "SDK: received first message");
-
-  await kernelClient.reportHealth(agentId, "busy").catch(() => {});
-  startTyping();
-
-  // Create the message stream and seed with first message
+  // Create the message stream (empty — first message pushed after command filtering)
   const stream = new MessageStream();
-  stream.push(firstFormatted, sessionId);
-  resetSendFlag();
-
-  // Background coroutine: continuously read from injector and push to stream
-  const pumpMessages = async () => {
-    while (true) {
-      try {
-        const msg = await injector.waitForMessage();
-        lastMessage = msg;
-        const formatted = await formatMessageForAgent(msg);
-        logger.info({ formatted: typeof formatted === "string" ? formatted : "[multimodal]" }, "SDK: injecting message");
-        resetSendFlag(); // Reset flag for the new turn
-        stream.push(formatted, sessionId);
-        await kernelClient.reportHealth(agentId, "busy").catch(() => {});
-        startTyping();
-      } catch (err) {
-        logger.error({ err }, "SDK: message pump error");
-        break;
-      }
-    }
-  };
-  const pumpPromise = pumpMessages();
-  pumpPromise.catch((err) => {
-    logger.error({ err }, "SDK: message pump crashed");
-    stream.end();
-  });
 
   // Build environment for the SDK subprocess
   const env: Record<string, string | undefined> = {
@@ -304,6 +270,127 @@ async function runSdkLoop(
     },
   });
 
+  /** Handle a slash command at the Runtime level. Returns true if handled (don't push to stream). */
+  async function handleRuntimeCommand(msg: InboundMessage): Promise<boolean> {
+    const meta = (msg as any).metadata as { command?: string; args?: string; raw?: string } | undefined;
+    if (!meta?.command) return false;
+
+    const cmd = meta.command;
+    const args = meta.args ?? "";
+
+    if (cmd === "/model") {
+      if (!args) {
+        await kernelClient.sendMessage({
+          channel: msg.channel, conversation: msg.conversation.id,
+          content: { type: "text", text: `Current model: ${model}` },
+          replyTo: msg.id,
+        }).catch(() => {});
+        return true;
+      }
+      try {
+        await q.setModel(args);
+        logger.info({ newModel: args }, "SDK: model changed via /model command");
+        await kernelClient.sendMessage({
+          channel: msg.channel, conversation: msg.conversation.id,
+          content: { type: "text", text: `Model switched to: ${args}` },
+          replyTo: msg.id,
+        }).catch(() => {});
+      } catch (err) {
+        await kernelClient.sendMessage({
+          channel: msg.channel, conversation: msg.conversation.id,
+          content: { type: "text", text: `Failed to switch model: ${err instanceof Error ? err.message : String(err)}` },
+          replyTo: msg.id,
+        }).catch(() => {});
+      }
+      return true;
+    }
+
+    if (cmd === "/interrupt") {
+      try {
+        await q.interrupt();
+        logger.info("SDK: interrupted via /interrupt command");
+        await kernelClient.sendMessage({
+          channel: msg.channel, conversation: msg.conversation.id,
+          content: { type: "text", text: "Interrupted." },
+          replyTo: msg.id,
+        }).catch(() => {});
+      } catch (err) {
+        logger.error({ err }, "SDK: /interrupt failed");
+      }
+      return true;
+    }
+
+    if (cmd === "/cost") {
+      // cumulativeCost is tracked from result messages
+      await kernelClient.sendMessage({
+        channel: msg.channel, conversation: msg.conversation.id,
+        content: { type: "text", text: `Session cost: $${cumulativeCost.toFixed(4)}` },
+        replyTo: msg.id,
+      }).catch(() => {});
+      return true;
+    }
+
+    // Not a runtime command — let it pass through to SDK
+    return false;
+  }
+
+  // Wait for the first non-command message before starting the SDK query
+  let firstMsg: InboundMessage;
+  while (true) {
+    firstMsg = await injector.waitForMessage();
+    lastMessage = firstMsg;
+    if (await handleRuntimeCommand(firstMsg)) continue;
+    break;
+  }
+  const firstFormatted = await formatMessageForAgent(firstMsg);
+  logger.info({ formatted: firstFormatted }, "SDK: received first message");
+
+  await kernelClient.reportHealth(agentId, "busy").catch(() => {});
+  startTyping();
+
+  // Seed stream with first message
+  stream.push(firstFormatted, sessionId);
+  resetSendFlag();
+
+  // Background coroutine: continuously read from injector and push to stream
+  const pumpMessages = async () => {
+    while (true) {
+      try {
+        const msg = await injector.waitForMessage();
+        lastMessage = msg;
+
+        // Check for runtime commands
+        if (await handleRuntimeCommand(msg)) continue;
+
+        // Check for SDK commands — push raw command text, not notification header
+        const meta = (msg as any).metadata as { command?: string; raw?: string } | undefined;
+        if (meta?.command) {
+          // SDK command: push just the command text (e.g. "/compact")
+          logger.info({ command: meta.raw }, "SDK: forwarding command to SDK");
+          resetSendFlag();
+          stream.push(meta.raw ?? meta.command, sessionId);
+          continue;
+        }
+
+        // Normal message
+        const formatted = await formatMessageForAgent(msg);
+        logger.info({ formatted: typeof formatted === "string" ? formatted : "[multimodal]" }, "SDK: injecting message");
+        resetSendFlag();
+        stream.push(formatted, sessionId);
+        await kernelClient.reportHealth(agentId, "busy").catch(() => {});
+        startTyping();
+      } catch (err) {
+        logger.error({ err }, "SDK: message pump error");
+        break;
+      }
+    }
+  };
+  const pumpPromise = pumpMessages();
+  pumpPromise.catch((err) => {
+    logger.error({ err }, "SDK: message pump crashed");
+    stream.end();
+  });
+
   try {
     for await (const msg of q) {
       if (msg.type === "system") {
@@ -323,6 +410,7 @@ async function runSdkLoop(
       if (msg.type === "result") {
         stopTyping();
         if (msg.subtype === "success") {
+          cumulativeCost += msg.total_cost_usd ?? 0;
           sessionId = msg.session_id;
           logger.info(
             {

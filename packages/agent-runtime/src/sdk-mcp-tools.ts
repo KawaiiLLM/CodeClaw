@@ -257,7 +257,7 @@ export function createSdkMcpTools(
 
   const sendSticker = tool(
     "send_sticker",
-    "Send a sticker to a conversation. Use get_sticker_set first to browse available stickers.",
+    "Send a Telegram sticker by fileId. Each sticker has a unique fileId obtained from get_sticker_set or from received sticker messages in chat logs (JSONL field: fileId). Sticker sets are identified by name (e.g. 'HotCherry').",
     {
       channel: z.string().describe("Target channel"),
       conversation: z.string().describe("Conversation/chat ID"),
@@ -282,32 +282,40 @@ export function createSdkMcpTools(
 
   const getStickerSet = tool(
     "get_sticker_set",
-    "Browse a sticker set with visual thumbnails. Returns paginated stickers (default 10). Use to see what stickers look like before sending one.",
+    "Browse a Telegram sticker set by name. Returns paginated stickers with visual thumbnails (default 10, max 20). Internally queries the Telegram Skill directly (same container, no Kernel routing needed — this is a read-only lookup, not a message send). Static sticker thumbnails are cached on disk at ~/.claude/data/telegram/stickers/<setName>/<fileId>.webp — first call downloads from Telegram API, subsequent calls read from cache. Animated/video stickers have no thumbnail. Use the returned fileId with send_sticker to send one.",
     {
-      channel: z.string().describe("Target channel"),
       name: z.string().describe("Sticker set name (e.g. 'HotCherry')"),
       offset: z.number().optional().describe("Start index (default 0)"),
-      limit: z.number().optional().describe("Number of stickers to return (default 10)"),
+      limit: z.number().optional().describe("Number of stickers to return (default 10, max 20)"),
     },
-    async ({ channel, name, offset, limit }) => {
+    async ({ name, offset, limit }) => {
       try {
-        // Hook: auto-trigger choose_sticker action
+        // Send choose_sticker typing indicator (fire-and-forget)
         const conv = getConversation?.();
-        if (conv) {
-          const ep = skillServiceManager.getEndpoint(conv.channel);
-          if (ep) {
-            fetch(`${ep}/action`, {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ conversation: conv.conversationId, action: "choose_sticker" }),
-            }).catch(() => {});
-          }
+        const ep = skillServiceManager.getEndpoint("telegram");
+        if (conv && ep) {
+          fetch(`${ep}/action`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ conversation: conv.conversationId, action: "choose_sticker" }),
+          }).catch(() => {});
         }
 
-        const data = await kernelClient.sendOutbound({
-          channel, conversation: "",
-          skillEndpoint: "/sticker_set",
-          payload: { name, offset, limit },
-        }) as {
+        if (!ep) {
+          return { content: [{ type: "text" as const, text: "Telegram skill is not running" }], isError: true };
+        }
+
+        // Query skill directly (same container), not through Kernel
+        const res = await fetch(`${ep}/sticker_set`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, offset, limit }),
+        });
+        if (!res.ok) {
+          const err = await res.text();
+          return { content: [{ type: "text" as const, text: `Skill error ${res.status}: ${err}` }], isError: true };
+        }
+
+        const data = await res.json() as {
           name: string; title: string; total: number; offset: number; count: number;
           stickers: { index: number; fileId: string; emoji: string | null; thumbnail?: string; mimeType?: string; isAnimated: boolean; isVideo: boolean }[];
         };

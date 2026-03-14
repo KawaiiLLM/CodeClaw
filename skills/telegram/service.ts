@@ -335,6 +335,60 @@ async function main() {
 
   const chatActionBreaker = new ChatActionCircuitBreaker();
 
+  // --- Skill-level slash command handler ---
+
+  async function handleSkillCommand(cmd: string, args: string, chatId: string, replyToMsgId: number) {
+    try {
+      if (cmd === "/status") {
+        // Query Kernel status
+        let statusText: string;
+        try {
+          const res = await fetch(`${KERNEL_URL}/api/status`);
+          const data = await res.json() as {
+            uptime: number;
+            services: Record<string, unknown>;
+            queue: { pending: number };
+          };
+          const uptimeMin = Math.floor(data.uptime / 60000);
+          const serviceList = Object.keys(data.services);
+          statusText = [
+            `Uptime: ${uptimeMin}m`,
+            `Queue: ${data.queue.pending} pending`,
+            `Skills: ${serviceList.length > 0 ? serviceList.join(", ") : "none"}`,
+          ].join("\n");
+        } catch {
+          statusText = "Cannot reach Kernel";
+        }
+        await bot.api.sendMessage(chatId, statusText, {
+          reply_parameters: { message_id: replyToMsgId },
+        });
+
+      } else if (cmd === "/help") {
+        const helpText = [
+          "Skill commands (instant):",
+          "  /status — Kernel status, uptime, queue",
+          "  /help — This message",
+          "",
+          "Agent commands (routed to runtime):",
+          "  /model <name> — Switch model",
+          "  /interrupt — Stop current task",
+          "  /cost — Show accumulated API cost",
+          "",
+          "SDK commands (routed to Claude Code):",
+          "  /compact — Compress conversation context",
+          "  /review — Code review",
+          "  /simplify — Review code for quality",
+          "  /context — Show context info",
+        ].join("\n");
+        await bot.api.sendMessage(chatId, helpText, {
+          reply_parameters: { message_id: replyToMsgId },
+        });
+      }
+    } catch (err) {
+      console.error(`[telegram] handleSkillCommand(${cmd}) error:`, err);
+    }
+  }
+
   // --- Unified message handler ---
 
   bot.on("message", async (ctx) => {
@@ -372,6 +426,43 @@ async function main() {
         if (botUsername) text = text.replace(new RegExp(`@${botUsername}\\b`, "g"), "").trim();
         text = text || "(empty)";
 
+        // --- Slash command detection ---
+        if (text.startsWith("/")) {
+          const parts = text.split(/\s+/);
+          const cmd = parts[0].toLowerCase();
+          const args = parts.slice(1).join(" ");
+
+          // Skill-level commands: handle locally, don't forward to Agent
+          if (cmd === "/status" || cmd === "/help") {
+            await handleSkillCommand(cmd, args, chatId, tgMsgId);
+            return;
+          }
+
+          // Other commands: forward to Kernel with metadata.command
+          // Use raw command text as content (no notification header) so downstream
+          // layers can identify and route it. Channel/conversation info is in the
+          // InboundMessage fields, not needed in content text.
+          seq = appendToLog(chatId, { ...logBase, type: "text", text: msg.text });
+          kernelContent = { type: "text", text };
+
+          try {
+            await forwardToKernel({
+              id: `tg_${chatId}_${tgMsgId}`,
+              channel: "telegram",
+              sender,
+              conversation,
+              content: kernelContent,
+              timestamp,
+              metadata: { command: cmd, args, raw: text },
+            });
+            console.log(`[telegram] Forwarded command ${cmd} from ${sender.name}`);
+          } catch (err) {
+            console.error("[telegram] Failed to forward command:", err);
+          }
+          return;
+        }
+
+        // --- Normal text message handling ---
         seq = appendToLog(chatId, { ...logBase, type: "text", text: msg.text });
         const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyRef);
 
@@ -634,6 +725,9 @@ async function main() {
         const end = start + safeLimit;
         const page = set.stickers.slice(start, end);
 
+        const stickerCacheDir = join(DATA_BASE, "stickers", name);
+        if (!existsSync(stickerCacheDir)) mkdirSync(stickerCacheDir, { recursive: true });
+
         const stickers = await Promise.all(page.map(async (s, i) => {
           const entry: Record<string, unknown> = {
             index: start + i,
@@ -643,9 +737,16 @@ async function main() {
             isVideo: s.is_video ?? false,
           };
           if (!s.is_animated && !s.is_video) {
-            const thumbFileId = s.thumbnail?.file_id ?? s.file_id;
+            const cachePath = join(stickerCacheDir, `${s.file_id}.webp`);
             try {
-              const { buf } = await downloadTelegramFile(thumbFileId);
+              let buf: Buffer;
+              if (existsSync(cachePath)) {
+                buf = readFileSync(cachePath);
+              } else {
+                const thumbFileId = s.thumbnail?.file_id ?? s.file_id;
+                ({ buf } = await downloadTelegramFile(thumbFileId));
+                writeFileSync(cachePath, buf);
+              }
               entry.thumbnail = buf.toString("base64");
               entry.mimeType = "image/webp";
             } catch { /* skip thumbnail on error */ }
