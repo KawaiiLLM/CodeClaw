@@ -276,6 +276,18 @@ async function main() {
     console.log(`[telegram] Bot identity: @${me.username} (id: ${me.id})`);
   });
 
+  // Register command menu with Telegram (visible in input field autocomplete)
+  await bot.api.setMyCommands([
+    { command: "status", description: "Kernel status, uptime, queue" },
+    { command: "help", description: "Show available commands" },
+    { command: "model", description: "Switch model" },
+    { command: "interrupt", description: "Stop current task" },
+    { command: "cost", description: "Show session API cost" },
+    { command: "session", description: "List / switch sessions" },
+    { command: "compact", description: "Compress conversation context" },
+  ]).then(() => console.log("[telegram] Command menu registered"))
+    .catch((err) => console.error("[telegram] Failed to register command menu:", err));
+
   console.log(`[telegram] Starting (kernel: ${KERNEL_URL}, port: ${SERVICE_PORT})`);
 
   // --- Helpers ---
