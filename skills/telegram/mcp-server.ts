@@ -169,13 +169,21 @@ server.tool(
   "Browse a Telegram sticker set by name. Returns paginated stickers with thumbnails.",
   {
     name: z.string().describe("Sticker set name (e.g. 'HotCherry')"),
+    conversation: z.string().optional().describe("Conversation ID (for choose_sticker typing indicator)"),
     offset: z.number().optional().describe("Start index (default 0)"),
     limit: z.number().optional().describe("Number of stickers (default 10, max 20)"),
   },
-  async ({ name, offset, limit }) => {
+  async ({ name, conversation, offset, limit }) => {
     try {
       if (!SKILL_ENDPOINT) {
         return { content: [{ type: "text" as const, text: "Telegram skill endpoint not configured" }], isError: true };
+      }
+
+      if (conversation) {
+        fetch(`${SKILL_ENDPOINT}/action`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversation, action: "choose_sticker" }),
+        }).catch(() => {});
       }
 
       const res = await fetch(`${SKILL_ENDPOINT}/sticker_set`, {
