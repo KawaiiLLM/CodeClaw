@@ -41,14 +41,15 @@ export function createSdkMcpTools(
 
   const sendMessage = tool(
     "send_message",
-    "Send a message to a specific channel/conversation",
+    "Send a message to a specific channel/conversation. In group chats, listenMinutes opens a window to receive all group messages (not just @mentions) after sending.",
     {
       channel: z.string().describe("Target channel (e.g. 'telegram', 'web')"),
       conversation: z.string().describe("Conversation/chat ID"),
       text: z.string().describe("Message text to send"),
       replyTo: z.string().optional().describe("Message ID to reply to"),
+      listenMinutes: z.number().optional().describe("Minutes to listen for all group messages after sending (default 3, 0 to disable, max 1440)"),
     },
-    async ({ channel, conversation, text, replyTo }) => {
+    async ({ channel, conversation, text, replyTo, listenMinutes }) => {
       try {
         await kernelClient.sendMessage({
           channel,
@@ -58,6 +59,20 @@ export function createSdkMcpTools(
         });
         sentViaToolInTurn = true;
         messageSentCallback?.();
+
+        // Activate group watch window (fire-and-forget)
+        const minutes = listenMinutes ?? 3;
+        if (minutes > 0) {
+          const ep = skillServiceManager.getEndpoint(channel);
+          if (ep) {
+            fetch(`${ep}/watch`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ conversation, minutes }),
+            }).catch(() => {});
+          }
+        }
+
         return { content: [{ type: "text" as const, text: `Message sent to ${channel}/${conversation}` }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

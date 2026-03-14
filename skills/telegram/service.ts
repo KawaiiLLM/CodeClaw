@@ -310,6 +310,19 @@ async function main() {
     return false;
   }
 
+  /** Watch map: chatId → expiry timestamp. Group messages are forwarded while watched. */
+  const watchMap = new Map<string, number>();
+
+  function isWatched(chatId: string): boolean {
+    const expiry = watchMap.get(chatId);
+    if (!expiry) return false;
+    if (Date.now() > expiry) {
+      watchMap.delete(chatId);
+      return false;
+    }
+    return true;
+  }
+
   function makeSender(from: { id: number; first_name: string; last_name?: string }) {
     return {
       id: String(from.id),
@@ -574,8 +587,8 @@ async function main() {
       return;
     }
 
-    // --- Group: only forward if directly addressed ---
-    if (isGroup && !isDirectlyAddressed(ctx)) return;
+    // --- Group: only forward if directly addressed or watched ---
+    if (isGroup && !isDirectlyAddressed(ctx) && !isWatched(chatId)) return;
     if (!kernelContent) return;
 
     // --- Forward standard InboundMessage to Kernel (no extra fields) ---
@@ -861,6 +874,23 @@ async function main() {
       } catch (err) {
         console.error("[telegram] Failed to get message:", err);
         sendJson(res, 500, { error: String(err) });
+      }
+
+    } else if (req.method === "POST" && req.url === "/watch") {
+      try {
+        const body = await parseBody(req);
+        const { conversation, minutes } = body as { conversation: string; minutes?: number };
+        const dur = Math.max(0, Math.min(minutes ?? 3, 1440)); // cap at 24h
+        if (dur === 0) {
+          watchMap.delete(conversation);
+          console.log(`[telegram] Stopped watching ${conversation}`);
+        } else {
+          watchMap.set(conversation, Date.now() + dur * 60_000);
+          console.log(`[telegram] Watching ${conversation} for ${dur}m`);
+        }
+        sendJson(res, 200, { success: true, conversation, minutes: dur });
+      } catch (err) {
+        sendJson(res, 400, { error: String(err) });
       }
 
     } else {
