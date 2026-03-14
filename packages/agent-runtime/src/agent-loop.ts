@@ -14,14 +14,11 @@ import { logger } from "./logger.js";
 let sdkAvailable = false;
 let sdkQuery: typeof import("@anthropic-ai/claude-agent-sdk").query;
 let sdkListSessions: typeof import("@anthropic-ai/claude-agent-sdk").listSessions;
-let createSdkMcpToolsFn: typeof import("./sdk-mcp-tools.js").createSdkMcpTools;
 
 try {
   const sdk = await import("@anthropic-ai/claude-agent-sdk");
   sdkQuery = sdk.query;
   sdkListSessions = sdk.listSessions;
-  const toolsMod = await import("./sdk-mcp-tools.js");
-  createSdkMcpToolsFn = toolsMod.createSdkMcpTools;
   sdkAvailable = true;
   logger.info("Claude Agent SDK loaded successfully");
 } catch (err) {
@@ -190,6 +187,7 @@ async function runSdkLoop(
   workspacePath: string,
   sessionConfig: SessionAction,
   skillServiceManager: SkillServiceManager,
+  mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>,
 ): Promise<SessionAction> {
   const model = process.env.CLAUDE_MODEL ?? "aws-claude-opus-4-6";
   const baseURL = process.env.ANTHROPIC_BASE_URL;
@@ -201,10 +199,6 @@ async function runSdkLoop(
   // Session switch: set by handleRuntimeCommand, checked after interrupt causes result
   let pendingAction: SessionAction | null = null;
 
-  // Create MCP tools with double-send guard
-  const { server: mcpServer, wasSendMessageCalled, resetSendFlag, getCurrentConversation: setConversationCallback, onMessageSent } =
-    createSdkMcpToolsFn(kernelClient, skillServiceManager);
-
   // Track last message for fallback reply routing
   let lastMessage: InboundMessage | null = null;
   let sessionId = "";
@@ -215,22 +209,6 @@ async function runSdkLoop(
 
   // Stop typing when progress message appears (typing becomes redundant)
   progressTracker.onProgressStarted(() => stopTyping());
-
-  // Stop typing + delete progress as soon as agent sends a reply
-  onMessageSent(() => {
-    stopTyping();
-    progressTracker.cleanup().catch(() => {});
-  });
-
-  // Wire up conversation callback for MCP tools that need current conversation context
-  setConversationCallback(() => {
-    if (!lastMessage) return null;
-    return {
-      channel: lastMessage.channel,
-      conversationId: lastMessage.conversation.id,
-      lastMessageId: lastMessage.id,
-    };
-  });
 
   // Typing indicator interval
   let typingTimer: ReturnType<typeof setInterval> | null = null;
@@ -281,9 +259,7 @@ async function runSdkLoop(
       model,
       cwd: process.env.HOME ?? workspacePath,
       env,
-      mcpServers: {
-        codeclaw: mcpServer,
-      },
+      mcpServers,
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       persistSession: true,
@@ -475,7 +451,6 @@ async function runSdkLoop(
 
   // Seed stream with first message
   stream.push(firstFormatted, sessionId);
-  resetSendFlag();
 
   // Background coroutine: continuously read from injector and push to stream
   let pumpStopped = false;
@@ -498,7 +473,6 @@ async function runSdkLoop(
         if (meta?.command) {
           // SDK command: push just the command text (e.g. "/compact")
           logger.info({ command: meta.raw }, "SDK: forwarding command to SDK");
-          resetSendFlag();
           stream.push(meta.raw ?? meta.command, sessionId);
           continue;
         }
@@ -506,7 +480,6 @@ async function runSdkLoop(
         // Normal message
         const formatted = await formatMessageForAgent(msg);
         logger.info({ formatted: typeof formatted === "string" ? formatted : "[multimodal]" }, "SDK: injecting message");
-        resetSendFlag();
         stream.push(formatted, sessionId);
         await kernelClient.reportHealth(agentId, "busy").catch(() => {});
         startTyping();
@@ -559,6 +532,13 @@ async function runSdkLoop(
           const block = event.content_block;
           if (block?.type === "tool_use" || block?.type === "mcp_tool_use") {
             progressTracker.onToolStarted(block.id, block.name);
+
+            // Stop typing + clear progress when agent calls a send-type tool
+            const SEND_TOOLS = new Set(["mcp__telegram__send_message", "mcp__telegram__send_sticker", "mcp__telegram__send_poll"]);
+            if (SEND_TOOLS.has(block.name)) {
+              stopTyping();
+              progressTracker.cleanup().catch(() => {});
+            }
           }
         }
         continue;
@@ -599,14 +579,9 @@ async function runSdkLoop(
               durationMs: msg.duration_ms,
               inputTokens: msg.usage.input_tokens,
               outputTokens: msg.usage.output_tokens,
-              resultLength: msg.result?.length ?? 0,
-              sentViaTool: wasSendMessageCalled(),
             },
             "SDK: turn completed",
           );
-
-          // No fallback auto-send: agent must use send_message to reply.
-          // This prevents internal SDK state from leaking to chat.
         } else {
           // Error result
           const errors = "errors" in msg ? msg.errors : [];
@@ -633,8 +608,6 @@ async function runSdkLoop(
             }
           }
         }
-
-        resetSendFlag(); // Reset for next turn
 
         // Check if a session switch was requested (set by /session command before interrupt)
         if (pendingAction) {
@@ -853,8 +826,9 @@ export async function startAgentLoop(opts: {
   agentId: string;
   workspacePath: string;
   skillServiceManager: SkillServiceManager;
+  mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
 }): Promise<void> {
-  const { injector, kernelClient, agentId, workspacePath, skillServiceManager } = opts;
+  const { injector, kernelClient, agentId, workspacePath, skillServiceManager, mcpServers } = opts;
 
   // Report initial health
   await kernelClient.reportHealth(agentId, "alive").catch(() => {});
@@ -876,7 +850,7 @@ export async function startAgentLoop(opts: {
       let nextAction: SessionAction = { type: "continue" };
       while (nextAction.type !== "exit") {
         logger.info({ action: nextAction }, "SDK: starting session");
-        nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, nextAction, skillServiceManager);
+        nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, nextAction, skillServiceManager, mcpServers);
         if (nextAction.type !== "exit") {
           logger.info({ nextAction }, "SDK: restarting with new session config");
         }
