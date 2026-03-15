@@ -29,6 +29,7 @@ export interface AgentHealthReport {
   timestamp: number;
   sessionId?: string;
   lastAssistantMessageId?: string;
+  conversation?: string;
 }
 
 export interface KernelStatus {

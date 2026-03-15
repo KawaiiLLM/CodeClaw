@@ -66,7 +66,7 @@ export class KernelClient {
   async reportHealth(
     agentId: string,
     status: "alive" | "busy" | "idle",
-    extra?: { sessionId?: string; lastAssistantMessageId?: string },
+    extra?: { sessionId?: string; lastAssistantMessageId?: string; conversation?: string },
   ): Promise<void> {
     await this.post("/api/agent/health", {
       agentId,

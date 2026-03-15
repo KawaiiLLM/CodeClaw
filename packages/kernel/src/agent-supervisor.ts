@@ -88,6 +88,19 @@ export class AgentSupervisor {
     };
   }
 
+  /** Get health states for all monitored agents. */
+  getAllHealth(): Record<string, { status: string; lastReportAt: number; conversation?: string }> {
+    const result: Record<string, { status: string; lastReportAt: number; conversation?: string }> = {};
+    for (const [agentId, state] of this.agents) {
+      result[agentId] = {
+        status: state.lastHealth?.status ?? "unknown",
+        lastReportAt: state.lastHealthAt,
+        conversation: state.lastHealth?.conversation,
+      };
+    }
+    return result;
+  }
+
   /** Get the last session ID reported by an agent (for session resume). */
   getLastSessionId(agentId: string): string | undefined {
     return this.agents.get(agentId)?.lastHealth?.sessionId;

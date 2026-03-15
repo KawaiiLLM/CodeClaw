@@ -96,6 +96,10 @@ export function createHttpServer(deps: ServerDeps) {
         };
       },
 
+      "/api/agent/health": async () => {
+        return supervisor.getAllHealth();
+      },
+
       "/api/status": async () => {
         return {
           uptime: Date.now() - startedAt,
