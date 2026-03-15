@@ -282,6 +282,70 @@ server.tool(
   },
 );
 
+server.tool(
+  "show_progress",
+  `Toggle a progress status message in the conversation. Use ONLY for long-running tasks (multi-step file analysis, complex searches, etc.) — not for quick replies.
+
+When active=true: creates or updates a visible status message and suppresses the automatic typing indicator.
+When active=false: deletes the status message and resumes automatic typing.
+
+Typical flow:
+1. show_progress(active: true, status: "Analyzing chat history...")
+2. ...do work (Read, Grep, Bash, etc.)...
+3. show_progress(active: true, status: "Processing results...")
+4. ...more work...
+5. When ready to reply, call show_progress(active: false) in PARALLEL with send_message.`,
+  {
+    channel: z.string().describe("Target channel"),
+    conversation: z.string().describe("Conversation/chat ID"),
+    active: z.boolean().describe("true to show/update progress, false to dismiss"),
+    status: z.string().optional().describe("Status text (required when active=true)"),
+  },
+  async ({ channel, conversation, active, status }) => {
+    try {
+      if (active) {
+        if (!status) {
+          return { content: [{ type: "text" as const, text: "status is required when active=true" }], isError: true };
+        }
+        if (progressMsgId && progressConv === conversation) {
+          // Edit existing progress message
+          await kernelPost("/api/messages/outbound", {
+            channel,
+            conversation,
+            content: { type: "text", text: status },
+            editMessageId: String(progressMsgId),
+          });
+        } else {
+          // Clean up old progress message if switching conversation
+          if (progressMsgId && progressConv) {
+            sendOutbound({ channel, conversation: progressConv, skillEndpoint: "/delete", payload: { conversation: progressConv, messageId: progressMsgId } }).catch(() => {});
+          }
+          // Send new progress message (progress: true skips JSONL)
+          const res = await kernelPost("/api/messages/outbound", {
+            channel,
+            conversation,
+            content: { type: "text", text: status },
+            progress: true,
+          });
+          progressMsgId = res?.messageId ? Number(res.messageId) : null;
+          progressConv = conversation;
+        }
+        return { content: [{ type: "text" as const, text: "Progress shown" }] };
+      } else {
+        // Dismiss progress message
+        if (progressMsgId && progressConv) {
+          await sendOutbound({ channel, conversation: progressConv, skillEndpoint: "/delete", payload: { conversation: progressConv, messageId: progressMsgId } }).catch(() => {});
+          progressMsgId = null;
+          progressConv = null;
+        }
+        return { content: [{ type: "text" as const, text: "Progress dismissed" }] };
+      }
+    } catch (err) {
+      return { content: [{ type: "text" as const, text: `Failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+  },
+);
+
 // --- Typing auto-poll (Layer 1) ---
 
 const TYPING_POLL_MS = 5000;
