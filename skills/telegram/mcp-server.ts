@@ -357,7 +357,7 @@ Typical flow:
 // --- Typing auto-poll (Layer 1) ---
 
 const TYPING_POLL_MS = 5000;
-const AGENT_ID = process.env.AGENT_ID ?? "andy";
+const AGENT_ID = process.env.AGENT_ID ?? "agent-0";
 
 function sendTyping(conversation: string): void {
   if (!SKILL_ENDPOINT) return;

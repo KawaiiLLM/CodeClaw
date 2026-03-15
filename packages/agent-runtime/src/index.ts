@@ -7,7 +7,7 @@ import { startAgentLoop } from "./agent-loop.js";
 import { logger } from "./logger.js";
 
 async function main() {
-  const agentId = process.env.AGENT_ID ?? "andy";
+  const agentId = process.env.AGENT_ID ?? "agent-0";
   const kernelUrl = process.env.KERNEL_URL ?? "http://localhost:19000";
   const workspacePath = process.env.HOME ?? "/home/codeclaw";
 
