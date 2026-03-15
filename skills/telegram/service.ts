@@ -643,7 +643,11 @@ async function main() {
         };
 
         // Edit path: editMessageId present
-        if (editMessageId && content.type === "text") {
+        if (editMessageId) {
+          if (content.type !== "text") {
+            sendJson(res, 400, { error: "editMessageId is only supported for text content" });
+            return;
+          }
           const msgId = parseInt(editMessageId, 10);
           if (isNaN(msgId)) {
             sendJson(res, 400, { error: "Invalid editMessageId" });
