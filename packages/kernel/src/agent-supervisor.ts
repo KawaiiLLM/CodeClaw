@@ -65,10 +65,19 @@ export class AgentSupervisor {
 
   /** Called by the HTTP server when an agent reports health. */
   reportHealth(report: AgentHealthReport): void {
-    const state = this.agents.get(report.agentId);
+    let state = this.agents.get(report.agentId);
     if (!state) {
-      logger.warn({ agentId: report.agentId }, "Health report from unmonitored agent");
-      return;
+      // Auto-register agents that report health (e.g. manually deployed containers)
+      state = {
+        agentId: report.agentId,
+        lastHealth: null,
+        lastHealthAt: Date.now(),
+        consecutiveFailures: 0,
+        monitorInterval: null,
+        crashCallbacks: [],
+      };
+      this.agents.set(report.agentId, state);
+      logger.info({ agentId: report.agentId }, "Auto-registered agent from health report");
     }
 
     state.lastHealth = report;
@@ -79,12 +88,13 @@ export class AgentSupervisor {
   }
 
   /** Get the last known health state of an agent. */
-  getHealth(agentId: string): { status: string; lastReportAt: number } | null {
+  getHealth(agentId: string): { status: string; lastReportAt: number; conversation?: string } | null {
     const state = this.agents.get(agentId);
     if (!state) return null;
     return {
       status: state.lastHealth?.status ?? "unknown",
       lastReportAt: state.lastHealthAt,
+      conversation: state.lastHealth?.conversation,
     };
   }
 
