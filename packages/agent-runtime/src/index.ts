@@ -100,8 +100,17 @@ async function main() {
     }
   }
 
-  // Assemble MCP server configs from skill manifests (stdio transport)
+  // Assemble MCP server configs: core (built-in) + skill manifests (stdio transport)
   const mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {};
+
+  // Core MCP server: inter-agent communication, system tools (always registered)
+  const coreMcpEntry = join("/codeclaw", "packages", "agent-runtime", "src", "core-mcp-server.ts");
+  mcpServers["core"] = {
+    command: "tsx",
+    args: [coreMcpEntry],
+    env: { KERNEL_URL: kernelUrl, AGENT_ID: agentId },
+  };
+  logger.info({ mcpEntrypoint: coreMcpEntry }, "Registered core MCP server");
 
   if (existsSync(skillsDir)) {
     const mcpEntries = readdirSync(skillsDir, { withFileTypes: true })

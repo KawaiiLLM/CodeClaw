@@ -499,7 +499,22 @@ async function runSdkLoop(
         if (meta?.command) {
           // SDK command: push just the command text (e.g. "/compact")
           logger.info({ command: meta.raw }, "SDK: forwarding command to SDK");
+
+          // Send user feedback for SDK-internal commands that don't produce agent output
+          if (meta.command === "/compact") {
+            await kernelClient.sendMessage({
+              channel: msg.channel, conversation: msg.conversation.id,
+              content: { type: "text", text: "Compacting conversation context..." },
+              replyTo: msg.id,
+            }).catch(() => {});
+          }
+
           stream.push(meta.raw ?? meta.command, sessionId, { channel: msg.channel, conversation: msg.conversation.id });
+          healthState.status = "busy";
+          healthState.conversation = `${msg.channel}/${msg.conversation.id}`;
+          await kernelClient.reportHealth(agentId, "busy", {
+            conversation: healthState.conversation,
+          }).catch(() => {});
           continue;
         }
 

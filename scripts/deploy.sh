@@ -26,7 +26,7 @@ done
 
 AGENT_ID="${AGENT_ID:-andy}"
 CONTAINER_NAME="codeclaw-agent-${AGENT_ID}"
-VOLUME="codeclaw-${AGENT_ID}-home"
+VOLUME="${DEPLOY_VOLUME:-codeclaw-${AGENT_ID}-home}"
 ENV_FILE="$HOME/.claude/config/agent-${AGENT_ID}.env"
 
 # Fallback to legacy env file for 'andy'
