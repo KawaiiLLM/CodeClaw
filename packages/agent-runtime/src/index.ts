@@ -138,7 +138,6 @@ async function main() {
       kernelClient,
       agentId,
       workspacePath,
-      skillServiceManager,
       mcpServers,
     });
   } catch (err) {

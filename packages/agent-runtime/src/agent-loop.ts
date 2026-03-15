@@ -5,7 +5,6 @@ import type { MessageParam } from "@anthropic-ai/sdk/resources";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { MessageInjector } from "./message-injector.js";
 import { KernelClient } from "./kernel-client.js";
-import type { SkillServiceManager } from "./skill-service-manager.js";
 import { logger } from "./logger.js";
 
 // --- SDK dynamic import ---
@@ -793,10 +792,9 @@ export async function startAgentLoop(opts: {
   kernelClient: KernelClient;
   agentId: string;
   workspacePath: string;
-  skillServiceManager: SkillServiceManager;
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
 }): Promise<void> {
-  const { injector, kernelClient, agentId, workspacePath, skillServiceManager, mcpServers } = opts;
+  const { injector, kernelClient, agentId, workspacePath, mcpServers } = opts;
 
   // Report initial health
   await kernelClient.reportHealth(agentId, "alive").catch(() => {});

@@ -356,7 +356,7 @@ Typical flow:
 const TYPING_POLL_MS = 5000;
 const AGENT_ID = process.env.AGENT_ID ?? "andy";
 
-async function sendTyping(conversation: string): Promise<void> {
+function sendTyping(conversation: string): void {
   if (!SKILL_ENDPOINT) return;
   fetch(`${SKILL_ENDPOINT}/action`, {
     method: "POST",
@@ -380,7 +380,7 @@ setInterval(async () => {
       // Layer 1: send typing
       const [channel, convId] = agent.conversation.split("/", 2);
       if (channel === "telegram" && convId) {
-        await sendTyping(convId);
+        sendTyping(convId);
       }
     } else if (agent.status === "idle" || agent.status === "alive") {
       // Safety net: clean up lingering progress message
