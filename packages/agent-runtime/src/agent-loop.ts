@@ -6,7 +6,6 @@ import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { MessageInjector } from "./message-injector.js";
 import { KernelClient } from "./kernel-client.js";
 import type { SkillServiceManager } from "./skill-service-manager.js";
-import { ProgressTracker } from "./progress-tracker.js";
 import { logger } from "./logger.js";
 
 // --- SDK dynamic import ---
@@ -233,35 +232,12 @@ class MessageStream {
   }
 }
 
-/** Send a chat action (e.g. "typing") directly to the Skill, bypassing Kernel. */
-function sendChatAction(
-  skillServiceManager: SkillServiceManager,
-  channel: string,
-  conversationId: string,
-  action: string,
-): void {
-  const endpoint = skillServiceManager.getEndpoint(channel);
-  if (!endpoint) return;
-  // Global fetch is correct here: /action goes to localhost (same container), no proxy needed
-  fetch(`${endpoint}/action`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ conversation: conversationId, action }),
-  }).catch(() => {}); // Fire-and-forget, failures silently ignored
-}
-
-const TYPING_INTERVAL_MS = 4000;
-
-/** MCP tools that send a visible reply — stop typing when detected in event stream */
-const SEND_TOOLS = new Set(["mcp__telegram__send_message", "mcp__telegram__send_sticker", "mcp__telegram__send_poll"]);
-
 async function runSdkLoop(
   injector: MessageInjector,
   kernelClient: KernelClient,
   agentId: string,
   workspacePath: string,
   sessionConfig: SessionAction,
-  skillServiceManager: SkillServiceManager,
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>,
 ): Promise<SessionAction> {
   const model = process.env.CLAUDE_MODEL ?? "aws-claude-opus-4-6";
@@ -278,33 +254,6 @@ async function runSdkLoop(
   let lastMessage: InboundMessage | null = null;
   let sessionId = "";
   let cumulativeCost = 0;
-
-  // Progress tracker: renders live tool chain in Telegram, mirrors CC's terminal UI
-  const progressTracker = new ProgressTracker(kernelClient);
-
-  // Stop typing when progress message appears (typing becomes redundant)
-  progressTracker.onProgressStarted(() => stopTyping());
-
-  // Typing indicator interval
-  let typingTimer: ReturnType<typeof setInterval> | null = null;
-
-  function startTyping(): void {
-    stopTyping();
-    if (!lastMessage) return;
-    const { channel, conversation } = lastMessage;
-    // Send immediately, then repeat every 4s
-    sendChatAction(skillServiceManager, channel, conversation.id, "typing");
-    typingTimer = setInterval(() => {
-      sendChatAction(skillServiceManager, channel, conversation.id, "typing");
-    }, TYPING_INTERVAL_MS);
-  }
-
-  function stopTyping(): void {
-    if (typingTimer) {
-      clearInterval(typingTimer);
-      typingTimer = null;
-    }
-  }
 
   // Create the message stream (empty — first message pushed after command filtering)
   const stream = new MessageStream();
@@ -523,8 +472,6 @@ async function runSdkLoop(
   await kernelClient.reportHealth(agentId, "busy", {
     conversation: `${firstMsg.channel}/${firstMsg.conversation.id}`,
   }).catch(() => {});
-  startTyping();
-  progressTracker.setTarget(firstMsg.channel, firstMsg.conversation.id, firstMsg.id);
 
   // Seed stream with first message
   stream.push(firstFormatted, sessionId, { channel: firstMsg.channel, conversation: firstMsg.conversation.id });
@@ -561,8 +508,6 @@ async function runSdkLoop(
         await kernelClient.reportHealth(agentId, "busy", {
           conversation: `${msg.channel}/${msg.conversation.id}`,
         }).catch(() => {});
-        startTyping();
-        progressTracker.setTarget(msg.channel, msg.conversation.id, msg.id);
       } catch (err) {
         logger.error({ err }, "SDK: message pump error");
         break;
@@ -585,66 +530,13 @@ async function runSdkLoop(
             "SDK: session initialized",
           );
           await kernelClient.reportHealth(agentId, "busy", { sessionId }).catch(() => {});
-        } else if ((msg as any).subtype === "task_started") {
-          progressTracker.onSubAgentStarted((msg as any).task_id, (msg as any).description ?? "Sub-task");
-        } else if ((msg as any).subtype === "task_progress") {
-          const tp = msg as any;
-          progressTracker.onSubAgentProgress(tp.task_id, tp.last_tool_name, tp.usage?.tool_uses);
-        } else if ((msg as any).subtype === "task_notification") {
-          progressTracker.onSubAgentCompleted((msg as any).task_id);
         } else {
           logger.debug({ subtype: (msg as any).subtype }, "SDK: system message");
         }
         continue;
       }
 
-      // Stream events: detect tool calls in real-time (before AssistantMessage)
-      if (msg.type === "stream_event") {
-        const event = (msg as any).event;
-        const parentId = (msg as any).parent_tool_use_id;
-
-        if (event?.type === "message_start" && !parentId) {
-          progressTracker.onNewResponse();
-        }
-
-        if (event?.type === "content_block_start" && !parentId) {
-          const block = event.content_block;
-          if (block?.type === "tool_use" || block?.type === "mcp_tool_use") {
-            progressTracker.onToolStarted(block.id, block.name);
-
-            // Stop typing + clear progress when agent calls a send-type tool
-            if (SEND_TOOLS.has(block.name)) {
-              stopTyping();
-              progressTracker.cleanup().catch(() => {});
-            }
-          }
-        }
-        continue;
-      }
-
-      // Tool progress heartbeats (elapsed time during execution)
-      if ((msg as any).type === "tool_progress") {
-        const tp = msg as any;
-        progressTracker.onToolProgress(tp.tool_use_id, tp.elapsed_time_seconds);
-        continue;
-      }
-
-      // AssistantMessage: resolve tool labels with full parsed input
-      if (msg.type === "assistant") {
-        if (!(msg as any).parent_tool_use_id) {
-          const content = (msg as any).message?.content ?? [];
-          for (const block of content) {
-            if (block.type === "tool_use" || block.type === "mcp_tool_use") {
-              progressTracker.onToolInputResolved(block.id, block.input);
-            }
-          }
-        }
-        continue;
-      }
-
       if (msg.type === "result") {
-        stopTyping();
-        await progressTracker.cleanup();
 
         if (msg.subtype === "success") {
           cumulativeCost += msg.total_cost_usd ?? 0;
@@ -712,8 +604,6 @@ async function runSdkLoop(
       }).catch(() => {});
     }
   } finally {
-    stopTyping();
-    await progressTracker.cleanup().catch(() => {});
     pumpStopped = true;
     stream.end();
     try { q.close(); } catch { /* best effort */ }
@@ -928,7 +818,7 @@ export async function startAgentLoop(opts: {
       let nextAction: SessionAction = { type: "continue" };
       while (nextAction.type !== "exit") {
         logger.info({ action: nextAction }, "SDK: starting session");
-        nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, nextAction, skillServiceManager, mcpServers);
+        nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, nextAction, mcpServers);
         if (nextAction.type !== "exit") {
           logger.info({ nextAction }, "SDK: restarting with new session config");
         }
