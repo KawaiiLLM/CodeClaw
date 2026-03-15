@@ -284,23 +284,23 @@ async function main() {
     console.log(`[telegram] Bot identity: @${me.username} (id: ${me.id})`);
   });
 
-  // Register bot username with Kernel for cross-agent @mention routing
-  const skillHostPort = process.env.SKILL_HOST_PORT;
-  if (skillHostPort) {
-    await fetch(`${KERNEL_URL}/api/services/register`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        skillId: "telegram",
-        type: "channel",
-        agentId: AGENT_ID,
-        capabilities: ["send_message", "receive_message"],
-        endpoint: `http://localhost:${skillHostPort}`,
-        metadata: { botUsername: bot.botInfo.username },
-      }),
-    }).then(() => console.log(`[telegram] Registered bot @${bot.botInfo.username} with Kernel`))
-      .catch((err: unknown) => console.error("[telegram] Failed to register bot username:", err));
-  }
+  // Re-register with Kernel to add botUsername metadata for cross-agent @mention routing.
+  // This overwrites the agent-runtime's initial registration (same composite key agentId:skillId).
+  // SKILL_HOST_PORT is the host-mapped port; fall back to SERVICE_PORT for local dev.
+  const skillHostPort = process.env.SKILL_HOST_PORT ?? String(SERVICE_PORT);
+  await fetch(`${KERNEL_URL}/api/services/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      skillId: "telegram",
+      type: "channel",
+      agentId: AGENT_ID,
+      capabilities: ["send_message", "receive_message"],
+      endpoint: `http://localhost:${skillHostPort}`,
+      metadata: { botUsername: bot.botInfo.username },
+    }),
+  }).then(() => console.log(`[telegram] Registered bot @${bot.botInfo.username} with Kernel`))
+    .catch((err: unknown) => console.error("[telegram] Failed to register bot username:", err));
 
   // Register command menu with Telegram (visible in input field autocomplete)
   await bot.api.setMyCommands([
@@ -401,11 +401,12 @@ async function main() {
 
   /** After sending a message, detect @bot mentions and route to target agents via /inject. */
   function forwardBotMentions(chatId: string, text: string, sentMsgId: number): void {
-    for (const [, username] of text.matchAll(/@(\w+)/g)) {
+    for (const [, username] of text.matchAll(/@(\w+bot)\b/gi)) {
       const targetAgentId = botRegistry.get(username);
       if (!targetAgentId || targetAgentId === AGENT_ID) continue;
 
-      // Route through Kernel outbound → target Skill's /inject endpoint
+      // Route through Kernel outbound → target Skill's /inject endpoint.
+      // Note: Kernel's skillEndpoint pass-through prepends { conversation } to payload.
       fetch(`${KERNEL_URL}/api/messages/outbound`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -714,10 +715,14 @@ async function main() {
   // --- Inline keyboard callback handler (model selection) ---
 
   bot.callbackQuery(/^models:(.+)$/, async (ctx) => {
+    if (!ctx.callbackQuery.message) {
+      await ctx.answerCallbackQuery({ text: "Message expired" });
+      return;
+    }
     const modelId = ctx.match![1];
     const label = MODEL_OPTIONS.find(m => m.id === modelId)?.label ?? modelId;
-    const chatId = String(ctx.callbackQuery.message!.chat.id);
-    const msgId = ctx.callbackQuery.message!.message_id;
+    const chatId = String(ctx.callbackQuery.message.chat.id);
+    const msgId = ctx.callbackQuery.message.message_id;
 
     await ctx.answerCallbackQuery({ text: `已选择 ${label}` });
     await bot.api.editMessageText(chatId, msgId, `模型已切换：${label}`, {
