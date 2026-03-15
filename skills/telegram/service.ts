@@ -25,6 +25,7 @@ const CONFIG_PATH = process.env.CONFIG_PATH ?? `${HOME}/.claude/config/telegram.
 const DATA_BASE = `${HOME}/.claude/data/telegram`;
 const PREVIEW_LIMIT = 200;
 const KERNEL_URL = process.env.KERNEL_URL ?? "http://localhost:19000";
+const AGENT_ID = process.env.AGENT_ID;
 const SERVICE_PORT = parseInt(process.env.SERVICE_PORT ?? "7001", 10);
 
 function loadConfig(): TelegramConfig {
@@ -479,6 +480,7 @@ async function main() {
             await forwardToKernel({
               id: `tg_${chatId}_${tgMsgId}`,
               channel: "telegram",
+              agentId: AGENT_ID,
               sender,
               conversation,
               content: kernelContent,
@@ -603,6 +605,7 @@ async function main() {
       await forwardToKernel({
         id: `tg_${chatId}_${tgMsgId}`,
         channel: "telegram",
+        agentId: AGENT_ID,
         sender,
         conversation,
         content: kernelContent,

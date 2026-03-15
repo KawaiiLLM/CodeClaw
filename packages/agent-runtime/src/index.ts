@@ -15,7 +15,7 @@ async function main() {
 
   // Initialize subsystems
   const kernelClient = new KernelClient(kernelUrl);
-  const injector = new MessageInjector(kernelClient);
+  const injector = new MessageInjector(kernelClient, 500, agentId);
   const skillServiceManager = new SkillServiceManager(kernelClient);
 
   // Graceful shutdown — registered inside main() so cleanup runs properly
@@ -71,6 +71,7 @@ async function main() {
           await kernelClient.registerSkillService({
             skillId,
             type: skillType,
+            agentId,
             capabilities: skillCapabilities,
             endpoint: `http://localhost:${port}`,
           });

@@ -16,8 +16,9 @@ export class KernelClient {
   }
 
   /** Fetch the next inbound message from the kernel queue. */
-  async getNextMessage(): Promise<InboundMessage | null> {
-    const res = (await this.get("/api/messages/next")) as Record<string, unknown>;
+  async getNextMessage(agentId?: string): Promise<InboundMessage | null> {
+    const path = agentId ? `/api/messages/next?agentId=${encodeURIComponent(agentId)}` : "/api/messages/next";
+    const res = (await this.get(path)) as Record<string, unknown>;
     if ("empty" in res && res.empty === true) {
       return null;
     }
