@@ -33,6 +33,8 @@ async function main() {
   const configDir = join(workspacePath, ".claude", "config");
   const PORT_BASE = 7001;
   let nextPort = PORT_BASE;
+  // Host-side port for registering with kernel (may differ from container-internal port)
+  const skillHostPort = process.env.SKILL_HOST_PORT ? parseInt(process.env.SKILL_HOST_PORT, 10) : undefined;
 
   const SKILL_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 
@@ -73,7 +75,7 @@ async function main() {
             type: skillType,
             agentId,
             capabilities: skillCapabilities,
-            endpoint: `http://localhost:${port}`,
+            endpoint: `http://localhost:${skillHostPort ?? port}`,
           });
         };
 

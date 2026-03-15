@@ -78,6 +78,7 @@ docker run -d \
   -e CLAUDE_MODEL=aws-claude-opus-4-6 \
   -e HTTP_PROXY=http://host.docker.internal:7890 \
   -e CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
+  -e SKILL_HOST_PORT="$PORT" \
   -v "$VOLUME":/home/codeclaw \
   -p "$PORT":7001 \
   "$IMAGE"
