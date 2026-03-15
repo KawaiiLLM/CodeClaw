@@ -111,27 +111,36 @@ RULES:
 - Messages may include reply-to references — use get_message to fetch context if needed
 - Keep responses concise and helpful`;
 
+/** Internal entry stored in MessageStream queue. */
+interface StreamEntry {
+  content: MessageParam["content"];
+  sessionId: string;
+  channel: string;
+  conversation: string;
+}
+
 /**
  * Bridges MessageInjector → AsyncIterable<SDKUserMessage> for the SDK query() stream input.
+ * When multiple messages accumulate during a turn, drains and merges them by conversation.
  */
 class MessageStream {
-  private queue: SDKUserMessage[] = [];
-  private waiter: ((msg: SDKUserMessage | null) => void) | null = null;
+  private queue: StreamEntry[] = [];
+  private waiter: ((entry: StreamEntry | null) => void) | null = null;
   private done = false;
 
-  push(content: MessageParam["content"], sessionId: string): void {
-    const msg: SDKUserMessage = {
-      type: "user",
-      message: { role: "user", content },
-      parent_tool_use_id: null,
-      session_id: sessionId,
+  push(content: MessageParam["content"], sessionId: string, meta?: { channel: string; conversation: string }): void {
+    const entry: StreamEntry = {
+      content,
+      sessionId,
+      channel: meta?.channel ?? "",
+      conversation: meta?.conversation ?? "",
     };
     if (this.waiter) {
       const resolve = this.waiter;
       this.waiter = null;
-      resolve(msg);
+      resolve(entry);
     } else {
-      this.queue.push(msg);
+      this.queue.push(entry);
     }
   }
 
@@ -140,24 +149,87 @@ class MessageStream {
     if (this.waiter) {
       const resolve = this.waiter;
       this.waiter = null;
-      resolve(null); // Unblock the iterator with a sentinel
+      resolve(null);
     }
   }
 
   async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage, void> {
     while (true) {
+      // Wait for at least one entry
+      let first: StreamEntry;
       const queued = this.queue.shift();
       if (queued) {
-        yield queued;
-        continue;
+        first = queued;
+      } else {
+        if (this.done) return;
+        const entry = await new Promise<StreamEntry | null>((resolve) => {
+          this.waiter = resolve;
+        });
+        if (entry === null) return;
+        first = entry;
       }
-      if (this.done) return;
-      const msg = await new Promise<SDKUserMessage | null>((resolve) => {
-        this.waiter = resolve;
-      });
-      if (msg === null) return; // Sentinel from end()
-      yield msg;
+
+      // Drain any additional pending entries and merge
+      if (this.queue.length > 0) {
+        const batch = [first, ...this.queue.splice(0)];
+        logger.info({ count: batch.length, conversations: [...new Set(batch.map(e => e.conversation))] }, "SDK: merging queued messages");
+        yield this.mergeEntries(batch);
+      } else {
+        yield this.toMessage(first);
+      }
     }
+  }
+
+  private toMessage(entry: StreamEntry): SDKUserMessage {
+    return {
+      type: "user",
+      message: { role: "user", content: entry.content },
+      parent_tool_use_id: null,
+      session_id: entry.sessionId,
+    };
+  }
+
+  private mergeEntries(entries: StreamEntry[]): SDKUserMessage {
+    // Group by conversation, preserving arrival order within each group
+    const groups = new Map<string, StreamEntry[]>();
+    for (const entry of entries) {
+      const key = `${entry.channel}/${entry.conversation}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(entry);
+    }
+
+    const allStrings = entries.every(e => typeof e.content === "string");
+
+    let merged: MessageParam["content"];
+    if (allStrings) {
+      const parts: string[] = [];
+      for (const group of groups.values()) {
+        for (const entry of group) {
+          parts.push(entry.content as string);
+        }
+      }
+      merged = parts.join("\n\n");
+    } else {
+      // Multimodal: flatten to content blocks, grouped by conversation
+      const blocks: Anthropic.ContentBlockParam[] = [];
+      for (const group of groups.values()) {
+        for (const entry of group) {
+          if (typeof entry.content === "string") {
+            blocks.push({ type: "text", text: entry.content });
+          } else if (Array.isArray(entry.content)) {
+            blocks.push(...(entry.content as Anthropic.ContentBlockParam[]));
+          }
+        }
+      }
+      merged = blocks;
+    }
+
+    return {
+      type: "user",
+      message: { role: "user", content: merged },
+      parent_tool_use_id: null,
+      session_id: entries[0].sessionId,
+    };
   }
 }
 
@@ -453,7 +525,7 @@ async function runSdkLoop(
   progressTracker.setTarget(firstMsg.channel, firstMsg.conversation.id, firstMsg.id);
 
   // Seed stream with first message
-  stream.push(firstFormatted, sessionId);
+  stream.push(firstFormatted, sessionId, { channel: firstMsg.channel, conversation: firstMsg.conversation.id });
 
   // Background coroutine: continuously read from injector and push to stream
   let pumpStopped = false;
@@ -476,14 +548,14 @@ async function runSdkLoop(
         if (meta?.command) {
           // SDK command: push just the command text (e.g. "/compact")
           logger.info({ command: meta.raw }, "SDK: forwarding command to SDK");
-          stream.push(meta.raw ?? meta.command, sessionId);
+          stream.push(meta.raw ?? meta.command, sessionId, { channel: msg.channel, conversation: msg.conversation.id });
           continue;
         }
 
         // Normal message
         const formatted = await formatMessageForAgent(msg);
         logger.info({ formatted: typeof formatted === "string" ? formatted : "[multimodal]" }, "SDK: injecting message");
-        stream.push(formatted, sessionId);
+        stream.push(formatted, sessionId, { channel: msg.channel, conversation: msg.conversation.id });
         await kernelClient.reportHealth(agentId, "busy").catch(() => {});
         startTyping();
         progressTracker.setTarget(msg.channel, msg.conversation.id, msg.id);

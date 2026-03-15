@@ -13,7 +13,7 @@ export class MessageInjector {
 
   constructor(
     private kernelClient: KernelClient,
-    private pollIntervalMs: number = 2000,
+    private pollIntervalMs: number = 500,
   ) {}
 
   /** Start polling the kernel for new messages. */

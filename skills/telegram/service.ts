@@ -124,8 +124,9 @@ function buildNotificationHeader(
   replyRef?: string,
 ): string {
   const date = todayStr();
+  const time = new Date().toLocaleTimeString("en-GB", { timeZone: "Asia/Shanghai", hour12: false });
   const replyTag = replyRef ? ` reply-to:${replyRef}` : "";
-  return `[telegram/${chatId}] ${senderName} (${date} seq:${seq} msgId:${tgMsgId}${replyTag}):\n  -> ~/.claude/data/telegram/${date}/${chatId}.jsonl`;
+  return `[telegram/${chatId}] ${senderName} (${date} ${time} seq:${seq} msgId:${tgMsgId}${replyTag}):\n  -> ~/.claude/data/telegram/${date}/${chatId}.jsonl`;
 }
 
 // --- ensureReplyPersisted ---
