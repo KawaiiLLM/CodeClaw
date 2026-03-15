@@ -10,6 +10,7 @@ import { z } from "zod";
 
 const KERNEL_URL = process.env.KERNEL_URL ?? "http://localhost:19000";
 const SKILL_ENDPOINT = process.env.SKILL_ENDPOINT; // e.g. "http://localhost:7001"
+const MCP_AGENT_ID = process.env.AGENT_ID;
 
 async function kernelPost(path: string, body: unknown): Promise<any> {
   const res = await fetch(`${KERNEL_URL}${path}`, {
@@ -30,6 +31,7 @@ async function sendMessageToKernel(msg: {
 }): Promise<{ messageId?: string }> {
   return kernelPost("/api/messages/outbound", {
     channel: msg.channel,
+    agentId: MCP_AGENT_ID,
     conversation: msg.conversation,
     content: { type: "text", text: msg.text },
     ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
@@ -45,6 +47,7 @@ async function sendOutbound(msg: {
 }): Promise<any> {
   return kernelPost("/api/messages/outbound", {
     channel: msg.channel,
+    agentId: MCP_AGENT_ID,
     conversation: msg.conversation,
     content: { type: "text", text: "" },
     skillEndpoint: msg.skillEndpoint,

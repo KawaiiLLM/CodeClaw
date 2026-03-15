@@ -10,9 +10,11 @@ import type {
  */
 export class KernelClient {
   private baseUrl: string;
+  private agentId?: string;
 
-  constructor(kernelUrl?: string) {
+  constructor(kernelUrl?: string, agentId?: string) {
     this.baseUrl = kernelUrl ?? process.env.KERNEL_URL ?? "http://localhost:19000";
+    this.agentId = agentId;
   }
 
   /** Fetch the next inbound message from the kernel queue. */
@@ -27,7 +29,8 @@ export class KernelClient {
 
   /** Send an outbound message through the kernel. Returns Skill response (e.g. messageId). */
   async sendMessage(msg: OutboundMessage): Promise<{ messageId?: string } & Record<string, unknown>> {
-    const res = await this.post("/api/messages/outbound", msg);
+    const payload = this.agentId && !msg.agentId ? { ...msg, agentId: this.agentId } : msg;
+    const res = await this.post("/api/messages/outbound", payload);
     return res as { messageId?: string } & Record<string, unknown>;
   }
 
@@ -55,6 +58,7 @@ export class KernelClient {
   }): Promise<Record<string, unknown>> {
     const res = await this.post("/api/messages/outbound", {
       channel: msg.channel,
+      agentId: this.agentId,
       conversation: msg.conversation,
       content: { type: "text", text: "" },
       skillEndpoint: msg.skillEndpoint,

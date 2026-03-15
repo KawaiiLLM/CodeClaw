@@ -14,7 +14,7 @@ async function main() {
   logger.info({ agentId, kernelUrl, workspacePath }, "CodeClaw Agent Runtime starting...");
 
   // Initialize subsystems
-  const kernelClient = new KernelClient(kernelUrl);
+  const kernelClient = new KernelClient(kernelUrl, agentId);
   const injector = new MessageInjector(kernelClient, 500, agentId);
   const skillServiceManager = new SkillServiceManager(kernelClient);
 
