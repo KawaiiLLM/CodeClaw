@@ -391,6 +391,12 @@ async function main() {
           reply_parameters: { message_id: replyToMsgId },
         });
 
+      } else if (cmd === "/start") {
+        // Telegram bot init command — just greet, don't forward to Agent
+        await bot.api.sendMessage(chatId, "Hello! Send me a message to get started.", {
+          reply_parameters: { message_id: replyToMsgId },
+        });
+
       } else if (cmd === "/help") {
         const helpText = [
           "Skill commands (instant):",
@@ -464,7 +470,7 @@ async function main() {
           const args = parts.slice(1).join(" ");
 
           // Skill-level commands: handle locally, don't forward to Agent
-          if (cmd === "/status" || cmd === "/help") {
+          if (cmd === "/start" || cmd === "/status" || cmd === "/help") {
             await handleSkillCommand(cmd, args, chatId, tgMsgId);
             return;
           }
