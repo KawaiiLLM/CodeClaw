@@ -19,7 +19,7 @@ interface ServerDeps {
   startedAt: number;
 }
 
-type RouteHandler = (body: unknown) => Promise<unknown>;
+type RouteHandler = (body: unknown, params?: URLSearchParams) => Promise<unknown>;
 
 export function createHttpServer(deps: ServerDeps) {
   const { messageQueue, ioBridge, supervisor, containerManager, startedAt } = deps;
@@ -83,8 +83,9 @@ export function createHttpServer(deps: ServerDeps) {
     },
 
     GET: {
-      "/api/messages/next": async () => {
-        const msg = messageQueue.dequeue();
+      "/api/messages/next": async (_body, params) => {
+        const agentId = params?.get("agentId") ?? undefined;
+        const msg = messageQueue.dequeue(agentId);
         return msg ?? { empty: true };
       },
 
@@ -93,6 +94,7 @@ export function createHttpServer(deps: ServerDeps) {
           pending: messageQueue.pendingCount(),
           channels: messageQueue.channels(),
           byChannel: messageQueue.pendingByChannel(),
+          byAgent: messageQueue.pendingByAgent(),
         };
       },
 
@@ -118,7 +120,9 @@ export function createHttpServer(deps: ServerDeps) {
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const method = req.method ?? "GET";
-    const url = req.url ?? "/";
+    const rawUrl = req.url ?? "/";
+    const parsedUrl = new URL(rawUrl, `http://${req.headers.host ?? "localhost"}`);
+    const url = parsedUrl.pathname;
 
     // CORS headers for local development
     res.setHeader("Content-Type", "application/json");
@@ -145,7 +149,7 @@ export function createHttpServer(deps: ServerDeps) {
         body = await parseJsonBody(req);
       }
 
-      const result = await handler(body);
+      const result = await handler(body, parsedUrl.searchParams);
       res.writeHead(200);
       res.end(JSON.stringify(result));
     } catch (err) {
