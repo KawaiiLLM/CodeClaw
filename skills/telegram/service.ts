@@ -634,13 +634,27 @@ async function main() {
     if (req.method === "POST" && req.url === "/send") {
       try {
         const body = await parseBody(req);
-        const { conversation, content, replyTo, progress } = body as {
+        const { conversation, content, replyTo, editMessageId, progress } = body as {
           conversation: string;
           content: { type: string; text: string };
           replyTo?: string;
+          editMessageId?: string;
           progress?: boolean;
         };
 
+        // Edit path: editMessageId present
+        if (editMessageId && content.type === "text") {
+          const msgId = parseInt(editMessageId, 10);
+          if (isNaN(msgId)) {
+            sendJson(res, 400, { error: "Invalid editMessageId" });
+            return;
+          }
+          await bot.api.editMessageText(conversation, msgId, content.text);
+          sendJson(res, 200, { success: true });
+          return;
+        }
+
+        // Send path
         if (content.type === "text") {
           // Parse replyTo: handles both raw IDs and composite "tg-chatId-msgId" format
           let replyMsgId: number | undefined;
@@ -675,21 +689,6 @@ async function main() {
         sendJson(res, 400, { error: `Unsupported content type: ${content.type}` });
       } catch (err) {
         console.error("[telegram] Failed to send outbound message:", err);
-        sendJson(res, 500, { error: String(err) });
-      }
-
-    } else if (req.method === "POST" && req.url === "/edit") {
-      try {
-        const body = await parseBody(req);
-        const { conversation, messageId, text } = body as {
-          conversation: string;
-          messageId: number;
-          text: string;
-        };
-        await bot.api.editMessageText(conversation, messageId, text);
-        sendJson(res, 200, { success: true });
-      } catch (err) {
-        console.error("[telegram] Failed to edit message:", err);
         sendJson(res, 500, { error: String(err) });
       }
 
