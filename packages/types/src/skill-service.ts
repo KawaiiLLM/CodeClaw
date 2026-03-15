@@ -9,4 +9,5 @@ export interface SkillServiceRegistration {
   channel?: string; // For channel-type skills: the channel name (defaults to skillId)
   capabilities: string[]; // ["send_message", "receive_message"]
   endpoint: string; // "http://localhost:7001"
+  metadata?: Record<string, unknown>; // Skill-specific metadata (e.g. { botUsername: "..." })
 }

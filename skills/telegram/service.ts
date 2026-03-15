@@ -284,6 +284,24 @@ async function main() {
     console.log(`[telegram] Bot identity: @${me.username} (id: ${me.id})`);
   });
 
+  // Register bot username with Kernel for cross-agent @mention routing
+  const skillHostPort = process.env.SKILL_HOST_PORT;
+  if (skillHostPort) {
+    await fetch(`${KERNEL_URL}/api/services/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        skillId: "telegram",
+        type: "channel",
+        agentId: AGENT_ID,
+        capabilities: ["send_message", "receive_message"],
+        endpoint: `http://localhost:${skillHostPort}`,
+        metadata: { botUsername: bot.botInfo.username },
+      }),
+    }).then(() => console.log(`[telegram] Registered bot @${bot.botInfo.username} with Kernel`))
+      .catch((err: unknown) => console.error("[telegram] Failed to register bot username:", err));
+  }
+
   // Register command menu with Telegram (visible in input field autocomplete)
   await bot.api.setMyCommands([
     { command: "status", description: "Kernel status, uptime, queue" },
@@ -355,6 +373,58 @@ async function main() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+  }
+
+  // --- Cross-agent @mention routing ---
+
+  /** Cache: botUsername → agentId. Refreshed periodically from Kernel. */
+  const botRegistry = new Map<string, string>();
+
+  async function refreshBotRegistry(): Promise<void> {
+    try {
+      const res = await fetch(`${KERNEL_URL}/api/status`);
+      const data = await res.json() as {
+        services: Record<string, { agentId?: string; skillId: string; metadata?: { botUsername?: string } }>;
+      };
+      botRegistry.clear();
+      for (const svc of Object.values(data.services)) {
+        if (svc.skillId === "telegram" && svc.metadata?.botUsername && svc.agentId) {
+          botRegistry.set(svc.metadata.botUsername, svc.agentId);
+        }
+      }
+    } catch { /* ignore — Kernel may be temporarily unavailable */ }
+  }
+
+  // Initial load + periodic refresh
+  await refreshBotRegistry();
+  setInterval(refreshBotRegistry, 60_000);
+
+  /** After sending a message, detect @bot mentions and route to target agents via /inject. */
+  function forwardBotMentions(chatId: string, text: string, sentMsgId: number): void {
+    for (const [, username] of text.matchAll(/@(\w+)/g)) {
+      const targetAgentId = botRegistry.get(username);
+      if (!targetAgentId || targetAgentId === AGENT_ID) continue;
+
+      // Route through Kernel outbound → target Skill's /inject endpoint
+      fetch(`${KERNEL_URL}/api/messages/outbound`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channel: "telegram",
+          agentId: targetAgentId,
+          conversation: chatId,
+          content: { type: "text", text: "" },
+          skillEndpoint: "/inject",
+          payload: {
+            sender: { id: String(bot.botInfo.id), name: bot.botInfo.first_name },
+            text,
+            tgMsgId: sentMsgId,
+            timestamp: Date.now(),
+          },
+        }),
+      }).catch((err) => console.error(`[telegram] Failed to forward @mention to ${targetAgentId}:`, err));
+      console.log(`[telegram] Forwarding @${username} mention to agent ${targetAgentId} via /inject`);
+    }
   }
 
   /** Download a Telegram file and return its content as a Buffer. */
@@ -733,6 +803,7 @@ async function main() {
               text: content.text,
               ...(replyMsgId ? { replyToTgMsgId: replyMsgId } : {}),
             });
+            forwardBotMentions(conversation, content.text, sent.message_id);
             sendJson(res, 200, { success: true, messageId: sent.message_id, seq: outSeq });
           } else {
             sendJson(res, 200, { success: true, messageId: sent.message_id });
@@ -961,6 +1032,45 @@ async function main() {
         sendJson(res, 200, { success: true, conversation, minutes: dur });
       } catch (err) {
         sendJson(res, 400, { error: String(err) });
+      }
+
+    } else if (req.method === "POST" && req.url === "/inject") {
+      // Cross-agent @mention injection: persist to JSONL, build header, forward to Kernel
+      try {
+        const body = await parseBody(req);
+        const { conversation, sender, text, tgMsgId, timestamp } = body as {
+          conversation: string;
+          sender: { id: string; name: string };
+          text: string;
+          tgMsgId: number;
+          timestamp: number;
+        };
+
+        const seq = appendToLog(conversation, {
+          ts: timestamp,
+          tgMsgId,
+          sender,
+          type: "text",
+          text,
+          injected: true,
+        });
+
+        const header = buildNotificationHeader(conversation, sender.name, seq, tgMsgId);
+        await forwardToKernel({
+          id: `tg_${conversation}_${tgMsgId}`,
+          channel: "telegram",
+          agentId: AGENT_ID,
+          sender: { ...sender, channel: "telegram" },
+          conversation: { id: conversation, type: "group" },
+          content: { type: "text", text: `${header}\n${text}` },
+          timestamp,
+        });
+
+        console.log(`[telegram] Injected @mention from ${sender.name} (tgMsgId:${tgMsgId}, seq:${seq})`);
+        sendJson(res, 200, { success: true, seq });
+      } catch (err) {
+        console.error("[telegram] Failed to inject message:", err);
+        sendJson(res, 500, { error: String(err) });
       }
 
     } else {
