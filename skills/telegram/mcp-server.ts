@@ -282,6 +282,47 @@ server.tool(
   },
 );
 
+// --- Typing auto-poll (Layer 1) ---
+
+const TYPING_POLL_MS = 5000;
+const AGENT_ID = process.env.AGENT_ID ?? "andy";
+
+/** Track active progress message — when set, skip typing (Layer 2 replaces Layer 1) */
+let progressMsgId: number | null = null;
+let progressConv: string | null = null;
+
+async function sendTyping(conversation: string): Promise<void> {
+  if (!SKILL_ENDPOINT) return;
+  fetch(`${SKILL_ENDPOINT}/action`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversation, action: "typing" }),
+  }).catch(() => {});
+}
+
+setInterval(async () => {
+  try {
+    const res = await fetch(`${KERNEL_URL}/api/agent/health`);
+    if (!res.ok) return;
+    const data = await res.json() as Record<string, { status: string; conversation?: string }>;
+    const agent = data[AGENT_ID];
+    if (!agent) return;
+
+    if (agent.status === "busy" && agent.conversation) {
+      // Layer 2 active → skip typing
+      if (progressMsgId) return;
+
+      // Layer 1: send typing
+      const [channel, convId] = agent.conversation.split("/", 2);
+      if (channel === "telegram" && convId) {
+        await sendTyping(convId);
+      }
+    }
+  } catch {
+    // Kernel unreachable, silently skip
+  }
+}, TYPING_POLL_MS);
+
 // --- Start ---
 
 const transport = new StdioServerTransport();

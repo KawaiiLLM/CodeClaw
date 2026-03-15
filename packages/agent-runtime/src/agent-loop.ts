@@ -520,7 +520,9 @@ async function runSdkLoop(
   const firstFormatted = await formatMessageForAgent(firstMsg);
   logger.info({ formatted: firstFormatted }, "SDK: received first message");
 
-  await kernelClient.reportHealth(agentId, "busy").catch(() => {});
+  await kernelClient.reportHealth(agentId, "busy", {
+    conversation: `${firstMsg.channel}/${firstMsg.conversation.id}`,
+  }).catch(() => {});
   startTyping();
   progressTracker.setTarget(firstMsg.channel, firstMsg.conversation.id, firstMsg.id);
 
@@ -556,7 +558,9 @@ async function runSdkLoop(
         const formatted = await formatMessageForAgent(msg);
         logger.info({ formatted: typeof formatted === "string" ? formatted : "[multimodal]" }, "SDK: injecting message");
         stream.push(formatted, sessionId, { channel: msg.channel, conversation: msg.conversation.id });
-        await kernelClient.reportHealth(agentId, "busy").catch(() => {});
+        await kernelClient.reportHealth(agentId, "busy", {
+          conversation: `${msg.channel}/${msg.conversation.id}`,
+        }).catch(() => {});
         startTyping();
         progressTracker.setTarget(msg.channel, msg.conversation.id, msg.id);
       } catch (err) {
