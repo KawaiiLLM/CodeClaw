@@ -2,7 +2,7 @@ import { readFileSync, existsSync, mkdirSync, appendFileSync, writeFileSync } fr
 import { join } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
-import { Bot } from "grammy";
+import { Bot, InlineKeyboard } from "grammy";
 
 // --- Proxy support (for environments behind a firewall) ---
 
@@ -27,6 +27,12 @@ const PREVIEW_LIMIT = 200;
 const KERNEL_URL = process.env.KERNEL_URL ?? "http://localhost:19000";
 const AGENT_ID = process.env.AGENT_ID;
 const SERVICE_PORT = parseInt(process.env.SERVICE_PORT ?? "7001", 10);
+
+const MODEL_OPTIONS = [
+  { label: "Opus 4", id: "aws-claude-opus-4-6" },
+  { label: "Sonnet 4", id: "aws-claude-sonnet-4-6" },
+  { label: "Haiku 4", id: "aws-claude-haiku-4-5" },
+];
 
 function loadConfig(): TelegramConfig {
   const raw = readFileSync(CONFIG_PATH, "utf-8");
@@ -282,7 +288,8 @@ async function main() {
   await bot.api.setMyCommands([
     { command: "status", description: "Kernel status, uptime, queue" },
     { command: "help", description: "Show available commands" },
-    { command: "model", description: "Switch model" },
+    { command: "models", description: "Choose model (inline keyboard)" },
+    { command: "model", description: "Switch model by name" },
     { command: "interrupt", description: "Stop current task" },
     { command: "cost", description: "Show session API cost" },
     { command: "session", description: "List / switch sessions" },
@@ -397,14 +404,25 @@ async function main() {
           reply_parameters: { message_id: replyToMsgId },
         });
 
+      } else if (cmd === "/models") {
+        const keyboard = new InlineKeyboard();
+        for (const m of MODEL_OPTIONS) {
+          keyboard.text(m.label, `models:${m.id}`).row();
+        }
+        await bot.api.sendMessage(chatId, "选择模型：", {
+          reply_parameters: { message_id: replyToMsgId },
+          reply_markup: keyboard,
+        });
+
       } else if (cmd === "/help") {
         const helpText = [
           "Skill commands (instant):",
           "  /status — Kernel status, uptime, queue",
+          "  /models — Choose model (inline keyboard)",
           "  /help — This message",
           "",
           "Agent commands (routed to runtime):",
-          "  /model <name> — Switch model",
+          "  /model <name> — Switch model by name",
           "  /interrupt — Stop current task",
           "  /cost — Show accumulated API cost",
           "  /session — List recent sessions",
@@ -470,7 +488,7 @@ async function main() {
           const args = parts.slice(1).join(" ");
 
           // Skill-level commands: handle locally, don't forward to Agent
-          if (cmd === "/start" || cmd === "/status" || cmd === "/help") {
+          if (cmd === "/start" || cmd === "/status" || cmd === "/help" || cmd === "/models") {
             await handleSkillCommand(cmd, args, chatId, tgMsgId);
             return;
           }
@@ -621,6 +639,39 @@ async function main() {
     } catch (err) {
       console.error("[telegram] Failed to forward to kernel:", err);
     }
+  });
+
+  // --- Inline keyboard callback handler (model selection) ---
+
+  bot.callbackQuery(/^models:(.+)$/, async (ctx) => {
+    const modelId = ctx.match![1];
+    const label = MODEL_OPTIONS.find(m => m.id === modelId)?.label ?? modelId;
+    const chatId = String(ctx.callbackQuery.message!.chat.id);
+    const msgId = ctx.callbackQuery.message!.message_id;
+
+    await ctx.answerCallbackQuery({ text: `已选择 ${label}` });
+    await bot.api.editMessageText(chatId, msgId, `模型已切换：${label}`, {
+      reply_markup: { inline_keyboard: [] },
+    });
+
+    // Forward as /model command to Agent via Kernel
+    const fromUser = ctx.callbackQuery.from;
+    await forwardToKernel({
+      id: `tg_${chatId}_models_${Date.now()}`,
+      channel: "telegram",
+      agentId: AGENT_ID,
+      sender: makeSender(fromUser),
+      conversation: makeConversation(ctx.callbackQuery.message!.chat as any),
+      content: { type: "text", text: `/model ${modelId}` },
+      timestamp: Date.now(),
+      metadata: { command: "/model", args: modelId, raw: `/model ${modelId}` },
+    });
+    console.log(`[telegram] Model switched to ${label} (${modelId}) by ${fromUser.first_name}`);
+  });
+
+  // Catch-all for unhandled callback queries (prevent loading animation hang)
+  bot.on("callback_query:data", async (ctx) => {
+    await ctx.answerCallbackQuery();
   });
 
   // --- HTTP server: kernel sends outbound messages here ---
