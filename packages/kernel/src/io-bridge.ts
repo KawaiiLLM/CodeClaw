@@ -8,18 +8,23 @@ import { logger } from "./logger.js";
 
 export class IOBridge {
   private services = new Map<string, SkillServiceRegistration>();
-  private channelIndex = new Map<string, string>(); // channel -> skillId
+  // Index: "agentId:channel" → skillId (with fallback to ":channel" for untagged)
+  private channelIndex = new Map<string, string>();
 
   constructor(private messageQueue: MessageQueue) {}
 
-  /** Register a skill service. Channel-type skills are indexed by channel name. */
+  /** Register a skill service. Channel-type skills are indexed by agentId + channel. */
   registerService(reg: SkillServiceRegistration): void {
     this.services.set(reg.skillId, reg);
     if (reg.type === "channel") {
       const channelName = reg.channel ?? reg.skillId;
-      this.channelIndex.set(channelName, reg.skillId);
+      const key = reg.agentId ? `${reg.agentId}:${channelName}` : `:${channelName}`;
+      this.channelIndex.set(key, reg.skillId);
     }
-    logger.info({ skillId: reg.skillId, type: reg.type, channel: reg.channel, endpoint: reg.endpoint }, "Skill service registered");
+    logger.info(
+      { skillId: reg.skillId, type: reg.type, agentId: reg.agentId, channel: reg.channel, endpoint: reg.endpoint },
+      "Skill service registered",
+    );
   }
 
   /** Unregister a skill service. */
@@ -28,18 +33,25 @@ export class IOBridge {
     if (reg) {
       if (reg.type === "channel") {
         const channelName = reg.channel ?? reg.skillId;
-        this.channelIndex.delete(channelName);
+        const key = reg.agentId ? `${reg.agentId}:${channelName}` : `:${channelName}`;
+        this.channelIndex.delete(key);
       }
       this.services.delete(skillId);
       logger.info({ skillId }, "Skill service unregistered");
     }
   }
 
-  /** Look up the skill service for a given channel. */
-  getServiceForChannel(channel: string): SkillServiceRegistration | null {
-    const skillId = this.channelIndex.get(channel);
+  /** Look up the skill service for a given channel, optionally scoped to an agent. */
+  getServiceForChannel(channel: string, agentId?: string): SkillServiceRegistration | null {
+    // Try agent-specific first
+    if (agentId) {
+      const skillId = this.channelIndex.get(`${agentId}:${channel}`);
+      if (skillId) return this.services.get(skillId) ?? null;
+    }
+    // Fallback: untagged (single-agent compat)
+    const skillId = this.channelIndex.get(`:${channel}`);
     if (skillId) return this.services.get(skillId) ?? null;
-    // Fallback: try skillId directly (for backward compat)
+    // Legacy fallback: try skillId directly
     return this.services.get(channel) ?? null;
   }
 
@@ -52,18 +64,18 @@ export class IOBridge {
   handleInbound(msg: InboundMessage): boolean {
     const enqueued = this.messageQueue.enqueue(msg);
     if (enqueued) {
-      logger.debug({ channel: msg.channel, msgId: msg.id, sender: msg.sender.name }, "Inbound message enqueued");
+      logger.debug({ channel: msg.channel, agentId: msg.agentId, msgId: msg.id, sender: msg.sender.name }, "Inbound message enqueued");
     } else {
       logger.debug({ channel: msg.channel, msgId: msg.id }, "Inbound message deduplicated");
     }
     return enqueued;
   }
 
-  /** Route an outbound message to the appropriate skill service. Returns the Skill's JSON response. */
-  async routeOutbound(msg: OutboundMessage): Promise<Record<string, unknown>> {
-    const service = this.getServiceForChannel(msg.channel);
+  /** Route an outbound message to the appropriate skill service. */
+  async routeOutbound(msg: OutboundMessage & { agentId?: string }): Promise<Record<string, unknown>> {
+    const service = this.getServiceForChannel(msg.channel, msg.agentId);
     if (!service) {
-      throw new Error(`No skill service registered for channel: ${msg.channel}`);
+      throw new Error(`No skill service registered for channel: ${msg.channel} (agentId: ${msg.agentId ?? "none"})`);
     }
 
     // Custom Skill endpoint: transparent pass-through
