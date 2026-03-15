@@ -1,0 +1,6 @@
+{
+  "skillId": "searxng",
+  "type": "tool",
+  "mcpEntrypoint": "/codeclaw/skills/searxng/mcp-server.ts",
+  "capabilities": ["web_search"]
+}
