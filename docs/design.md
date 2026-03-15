@@ -31,7 +31,7 @@ codeclaw/
 │       ├── package.json
 │       └── src/
 │           ├── index.ts            # 容器入口, 组装 + 信号处理
-│           ├── agent-loop.ts       # 核心: SDK/chat/stub 三层模式 + typing indicator
+│           ├── agent-loop.ts       # 核心: SDK/chat/stub 三层模式 (channel-agnostic)
 │           ├── kernel-client.ts    # HTTP 客户端 (GET/POST kernel API, 返回 messageId)
 │           ├── message-injector.ts # 轮询内核 + waitForMessage()
 │           ├── skill-service-manager.ts  # 子进程 Skill 生命周期 + getEndpoint()
@@ -71,8 +71,7 @@ codeclaw/
 Agent Runtime 运行在 Docker 容器内，职责是**驱动 Claude Agent 并与内核通信**。它是纯粹的执行层，不解析 Telegram 等平台细节。
 
 - **index.ts**: 容器入口，启动 SkillServiceManager，扫描 `manifest.json` 中的 `mcpEntrypoint` 组装 `McpStdioServerConfig`，传给 agent-loop，注册信号处理器。
-- **agent-loop.ts**: 系统核心。实现 SDK/chat/stub 三层模式（见下文），维护 typing indicator 的 setInterval，通过事件流检测 send 类 MCP 工具调用来停止 typing，通过 ProgressTracker 拦截 SDK 事件流自动展示工具调用链进度。MCP 工具通过 stdio 外部进程提供，Runtime 本身不持有任何工具定义。
-- **progress-tracker.ts**: 拦截 SDK 事件流（stream_event/tool_progress/task 事件），自动渲染工具调用链进度消息，含编辑节流和闪烁光标效果。
+- **agent-loop.ts**: 系统核心。实现 SDK/chat/stub 三层模式（见下文）。Channel-agnostic，不包含任何 typing/progress 逻辑——仅通过 `reportHealth(busy/idle)` 附带 `conversation` 字段上报状态。MCP 工具通过 stdio 外部进程提供，Runtime 本身不持有任何工具定义。
 - **kernel-client.ts**: 封装所有对内核 HTTP API 的调用，`sendMessage` 返回 `{ messageId? }` 供进度消息编辑使用。
 - **message-injector.ts**: 周期性轮询内核 `/api/messages/next`，通过 Promise resolve 机制将消息桥接为 `AsyncIterable<SDKUserMessage>`，null sentinel 关闭 stream。
 - **skill-service-manager.ts**: 扫描 `~/.claude/skills/*/manifest.json`，spawn Skill 子进程，动态分配端口，提供 `getEndpoint(skillId)` 供 agent-loop 直连 Skill（仅用于 chat action，不经 Kernel）。
@@ -90,7 +89,7 @@ Agent Runtime 运行在 Docker 容器内，职责是**驱动 Claude Agent 并与
 Telegram Skill 是一个自包含的独立进程，职责是**桥接 Telegram 平台与内核协议**。
 
 - **service.ts**: 启动 Grammy bot 长轮询；向内核注册自身；对入站消息做平台层预处理（@提及过滤、图片/贴纸下载与 base64 编码、引用消息提取）后转发给内核；提供 9 个 HTTP 端点供内核或 Agent 直连调用；以 JSONL 格式按日期目录持久化聊天记录，含 seq ID 内存索引。Telegram API 访问通过 undici ProxyAgent + Grammy transformer 走 HTTP 代理。
-- **mcp-server.ts**: 遵循 Claude Code Plugin 标准的 stdio MCP server。使用 `@modelcontextprotocol/sdk` 的 `StdioServerTransport`，由 SDK 作为子进程启动。包含 8 个工具（send_message、react_message、edit_message、delete_message、send_sticker、get_sticker_set、send_poll、get_message），自带 Kernel HTTP client，不依赖 agent-runtime。工具命名空间为 `mcp__telegram__*`。
+- **mcp-server.ts**: 遵循 Claude Code Plugin 标准的 stdio MCP server。使用 `@modelcontextprotocol/sdk` 的 `StdioServerTransport`，由 SDK 作为子进程启动。包含 9 个工具（send_message、react_message、edit_message、delete_message、send_sticker、get_sticker_set、send_poll、get_message、show_progress），自带 Kernel HTTP client，不依赖 agent-runtime。同时负责两层反馈（见下文）：轮询 Kernel health 自动发送 typing，管理 show_progress 工具的进度消息生命周期。工具命名空间为 `mcp__telegram__*`。
 - **SKILL.md**: 遵循 Agent Skills 开放标准（YAML frontmatter）。frontmatter 的 name/description 由 SDK 自动注入系统提示的 `<available_skills>` 索引（L1 层，约 24 tokens），body 是 Agent 按需 read 的操作手册，包含 MCP 工具用法、JSONL 数据格式、消息引用格式、群聊规则（L2 层）。
 
 ---
@@ -123,11 +122,15 @@ Agent 调用 MCP 工具（如 `mcp__telegram__send_message`）→ stdio MCP serv
 
 ---
 
-## 两层信号架构
+## 两层反馈模型
 
-**Layer 1 — Chat Action（自动，零 token）**：agent-loop 在收到 inbound 消息后启动 setInterval（每 4 秒），通过 SkillServiceManager.getEndpoint() 获取 Skill 地址，直接 POST 到 Skill `/action`（不经 Kernel）触发 Telegram typing 状态。Agent 调用 send_message 后立即停止 interval。Chat action 是纯表现层行为，绕过 Kernel 是合理的——Kernel 职责是消息路由，不是 UI 信号转发。
+agent-loop 是 channel-agnostic 的，仅通过 `reportHealth(busy/idle)` 上报状态（含 `conversation` 字段标识当前处理的会话）。所有 typing/progress 逻辑由 MCP server（Skill 侧）负责。
 
-**Layer 2 — 进度消息（Runtime 自动，零 token）**：agent-loop 的 ProgressTracker 拦截 SDK 事件流（stream_event / tool_progress / task 事件），自动发送并编辑一条进度消息展示工具调用链（类似 Claude Code 终端 UI）。进度消息带 `progress: true` 标记，Skill 侧跳过 JSONL 写入，不污染聊天记录。Agent 发送最终回复时自动删除进度消息。
+**Layer 1 — Typing（自动，零 token）**：MCP server 每 5 秒轮询 Kernel `GET /api/agent/health`，检测 agent 状态为 `busy` 且 `conversation` 属于 telegram 时，POST 到 Skill `/action` 发送 typing。Layer 2 激活时自动跳过 typing，避免频率限制冲突。
+
+**Layer 2 — Progress（Agent 主动，零 token）**：Agent 在长程任务中调用 `show_progress` MCP 工具展示/更新/关闭进度消息。进度消息带 `progress: true` 标记，Skill 侧跳过 JSONL 写入。Agent 完成任务时可调用 `show_progress(active: false)` 与 `send_message` 并行执行。
+
+**安全网**：MCP server 的 typing 轮询检测到 `idle`/`alive` 状态时，自动清理残留的 progress 消息，防止 /interrupt 或崩溃后遗留。
 
 ---
 
@@ -141,7 +144,8 @@ Agent 调用 MCP 工具（如 `mcp__telegram__send_message`）→ stdio MCP serv
 | GET | /api/messages/queue | 队列状态查询 |
 | POST | /api/services/register | Skill 注册 |
 | POST | /api/services/unregister | Skill 注销 |
-| POST | /api/agent/health | Agent 健康上报 |
+| POST | /api/agent/health | Agent 健康上报（含 conversation 字段） |
+| GET | /api/agent/health | Agent 健康状态查询（MCP server 轮询用） |
 | GET | /api/status | 内核总体状态 |
 
 ## Telegram Skill HTTP API
@@ -175,8 +179,7 @@ Agent 调用 MCP 工具（如 `mcp__telegram__send_message`）→ stdio MCP serv
 | 第一个通道 | Telegram (grammy) | 库成熟，长轮询模式简单 |
 | 图片处理 | base64 + magic bytes 检测 | 绕过不可靠的 Content-Type header |
 | SKILL.md 格式 | Agent Skills 开放标准 (YAML frontmatter) | SDK 内置渐进式披露：元数据索引 → Agent 按需 read |
-| Chat Action 路径 | 直连 Skill，不经 Kernel | Chat action 是纯 UI 信号，不属于消息路由职责 |
-| 进度消息 | Telegram editMessageText | 流式思考链，Code-first UX，不污染聊天记录 |
+| 反馈模型 | MCP server 轮询 Kernel health | agent-loop channel-agnostic，Skill 侧自治 |
 | 安全模型 | Docker 隔离 + 白名单 + Emoji 审批 | 三层防御，渐进式 |
 | Agent 记忆 | SQLite FTS5 | 轻量、无外部依赖、全文检索 |
 | Skill 安装 | Agent 自己写代码 | 对 Claude Code Agent 最自然的方式 |
