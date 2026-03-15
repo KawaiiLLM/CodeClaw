@@ -30,6 +30,10 @@ Tools are provided by the `telegram` MCP server (prefix: `mcp__telegram__`).
 
 - `send_poll` — Create a poll with 2-10 options.
 
+### Progress
+
+- `show_progress` — Toggle a progress status message. Use for long-running tasks only (multi-step analysis, complex searches). When active, replaces the automatic typing indicator. Call with `active: false` in parallel with `send_message` when ready to reply.
+
 ### History
 
 - `get_message` — Fetch a specific historical message by `date` + `seq` or `platformMessageId`.
