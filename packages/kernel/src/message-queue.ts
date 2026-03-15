@@ -41,10 +41,17 @@ export class MessageQueue {
     return true;
   }
 
-  /** Dequeue the highest-priority message (lowest priority number). */
-  dequeue(): InboundMessage | null {
-    const entry = this.queue.shift();
-    return entry?.message ?? null;
+  /** Dequeue the highest-priority message, optionally filtered by agentId. */
+  dequeue(agentId?: string): InboundMessage | null {
+    if (!agentId) {
+      const entry = this.queue.shift();
+      return entry?.message ?? null;
+    }
+    // Find first entry matching agentId
+    const idx = this.queue.findIndex((e) => e.message.agentId === agentId);
+    if (idx === -1) return null;
+    const [entry] = this.queue.splice(idx, 1);
+    return entry.message;
   }
 
   /** Peek at the next message without removing it. */
@@ -52,9 +59,10 @@ export class MessageQueue {
     return this.queue[0]?.message ?? null;
   }
 
-  /** Total pending messages. */
-  pendingCount(): number {
-    return this.queue.length;
+  /** Total pending messages, optionally filtered by agentId. */
+  pendingCount(agentId?: string): number {
+    if (!agentId) return this.queue.length;
+    return this.queue.filter((e) => e.message.agentId === agentId).length;
   }
 
   /** Pending messages grouped by channel. */
@@ -63,6 +71,16 @@ export class MessageQueue {
     for (const entry of this.queue) {
       const ch = entry.message.channel;
       result[ch] = (result[ch] ?? 0) + 1;
+    }
+    return result;
+  }
+
+  /** Pending messages grouped by agentId. */
+  pendingByAgent(): Record<string, number> {
+    const result: Record<string, number> = {};
+    for (const entry of this.queue) {
+      const id = entry.message.agentId ?? "_untagged";
+      result[id] = (result[id] ?? 0) + 1;
     }
     return result;
   }
