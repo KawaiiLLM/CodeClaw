@@ -101,20 +101,10 @@ export class IOBridge {
       return (await res.json()) as Record<string, unknown>;
     }
 
-    // Standard message routing: /edit or /send
-    const route = msg.editMessageId ? "/edit" : "/send";
-    const url = `${service.endpoint}${route}`;
-    logger.debug({ channel: msg.channel, conversation: msg.conversation, endpoint: url, route }, "Routing outbound message");
-
-    let payload: unknown;
-    if (msg.editMessageId) {
-      if (msg.content.type !== "text") {
-        throw new Error("editMessageId is only supported for text content");
-      }
-      payload = { conversation: msg.conversation, messageId: Number(msg.editMessageId), text: msg.content.text };
-    } else {
-      payload = msg;
-    }
+    // Standard message routing: transparent pass-through to Skill /send
+    const url = `${service.endpoint}/send`;
+    logger.debug({ channel: msg.channel, conversation: msg.conversation, endpoint: url }, "Routing outbound message");
+    const payload = msg;
 
     const res = await fetch(url, {
       method: "POST",
