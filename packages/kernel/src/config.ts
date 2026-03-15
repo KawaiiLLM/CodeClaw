@@ -27,9 +27,9 @@ const DEFAULT_CONFIG: KernelConfig = {
   },
   agents: [
     {
-      id: "andy",
+      id: "agent-0",
       image: "codeclaw/agent-runtime:dev",
-      volume: "codeclaw-andy-home",
+      volume: "codeclaw-agent-0-home",
       port: 7001,
     },
   ],
@@ -53,9 +53,9 @@ export function loadConfig(configPath?: string): KernelConfig {
     let agents: AgentConfig[];
     if (Array.isArray(parsed.agents)) {
       agents = (parsed.agents as Record<string, unknown>[]).map((a) => ({
-        id: (a.id as string) ?? "andy",
+        id: (a.id as string) ?? "agent-0",
         image: (a.image as string) ?? "codeclaw/agent-runtime:dev",
-        volume: (a.volume as string) ?? `codeclaw-${a.id ?? "andy"}-home`,
+        volume: (a.volume as string) ?? `codeclaw-${a.id ?? "agent-0"}-home`,
         port: (a.port as number) ?? 7001,
         envFile: a.env_file as string | undefined,
         extraEnv: a.extra_env as Record<string, string> | undefined,
@@ -65,9 +65,9 @@ export function loadConfig(configPath?: string): KernelConfig {
       const agent = parsed.agent as Record<string, unknown> | undefined;
       agents = [
         {
-          id: (agent?.id as string) ?? "andy",
+          id: (agent?.id as string) ?? "agent-0",
           image: (agent?.image as string) ?? "codeclaw/agent-runtime:dev",
-          volume: (agent?.workspace_volume as string) ?? "codeclaw-andy-home",
+          volume: (agent?.workspace_volume as string) ?? "codeclaw-agent-0-home",
           port: 7001,
         },
       ];
