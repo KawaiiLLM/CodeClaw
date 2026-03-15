@@ -282,6 +282,11 @@ server.tool(
   },
 );
 
+// --- Progress state (shared by Layer 1 typing and Layer 2 show_progress) ---
+
+let progressMsgId: number | null = null;
+let progressConv: string | null = null;
+
 server.tool(
   "show_progress",
   `Toggle a progress status message in the conversation. Use ONLY for long-running tasks (multi-step file analysis, complex searches, etc.) — not for quick replies.
@@ -351,10 +356,6 @@ Typical flow:
 const TYPING_POLL_MS = 5000;
 const AGENT_ID = process.env.AGENT_ID ?? "andy";
 
-/** Track active progress message — when set, skip typing (Layer 2 replaces Layer 1) */
-let progressMsgId: number | null = null;
-let progressConv: string | null = null;
-
 async function sendTyping(conversation: string): Promise<void> {
   if (!SKILL_ENDPOINT) return;
   fetch(`${SKILL_ENDPOINT}/action`, {
@@ -380,6 +381,18 @@ setInterval(async () => {
       const [channel, convId] = agent.conversation.split("/", 2);
       if (channel === "telegram" && convId) {
         await sendTyping(convId);
+      }
+    } else if (agent.status === "idle" || agent.status === "alive") {
+      // Safety net: clean up lingering progress message
+      if (progressMsgId && progressConv) {
+        sendOutbound({
+          channel: "telegram",
+          conversation: progressConv,
+          skillEndpoint: "/delete",
+          payload: { conversation: progressConv, messageId: progressMsgId },
+        }).catch(() => {});
+        progressMsgId = null;
+        progressConv = null;
       }
     }
   } catch {
