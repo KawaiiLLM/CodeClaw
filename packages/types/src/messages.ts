@@ -11,6 +11,7 @@ export type MessageContent =
 export interface InboundMessage {
   id: string;
   channel: string; // "telegram", "web", "cli"
+  agentId?: string; // Target agent for this message (set by skill or kernel)
   sender: {
     id: string;
     name: string;
