@@ -238,6 +238,7 @@ async function runSdkLoop(
   workspacePath: string,
   sessionConfig: SessionAction,
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>,
+  healthState: { status: "alive" | "busy" | "idle"; conversation?: string; sessionId?: string },
 ): Promise<SessionAction> {
   const model = process.env.CLAUDE_MODEL ?? "aws-claude-opus-4-6";
   const baseURL = process.env.ANTHROPIC_BASE_URL;
@@ -468,8 +469,10 @@ async function runSdkLoop(
   const firstFormatted = await formatMessageForAgent(firstMsg);
   logger.info({ formatted: firstFormatted }, "SDK: received first message");
 
+  healthState.status = "busy";
+  healthState.conversation = `${firstMsg.channel}/${firstMsg.conversation.id}`;
   await kernelClient.reportHealth(agentId, "busy", {
-    conversation: `${firstMsg.channel}/${firstMsg.conversation.id}`,
+    conversation: healthState.conversation,
   }).catch(() => {});
 
   // Seed stream with first message
@@ -504,8 +507,10 @@ async function runSdkLoop(
         const formatted = await formatMessageForAgent(msg);
         logger.info({ formatted: typeof formatted === "string" ? formatted : "[multimodal]" }, "SDK: injecting message");
         stream.push(formatted, sessionId, { channel: msg.channel, conversation: msg.conversation.id });
+        healthState.status = "busy";
+        healthState.conversation = `${msg.channel}/${msg.conversation.id}`;
         await kernelClient.reportHealth(agentId, "busy", {
-          conversation: `${msg.channel}/${msg.conversation.id}`,
+          conversation: healthState.conversation,
         }).catch(() => {});
       } catch (err) {
         logger.error({ err }, "SDK: message pump error");
@@ -528,7 +533,8 @@ async function runSdkLoop(
             { sessionId, model: msg.model, tools: msg.tools.length, mcpServers: msg.mcp_servers },
             "SDK: session initialized",
           );
-          await kernelClient.reportHealth(agentId, "busy", { sessionId }).catch(() => {});
+          healthState.sessionId = sessionId;
+          await kernelClient.reportHealth(agentId, "busy", { sessionId, conversation: healthState.conversation }).catch(() => {});
         } else {
           logger.debug({ subtype: (msg as any).subtype }, "SDK: system message");
         }
@@ -584,6 +590,8 @@ async function runSdkLoop(
           break;
         }
 
+        healthState.status = "idle";
+        healthState.conversation = undefined;
         await kernelClient.reportHealth(agentId, "idle", { sessionId }).catch(() => {});
         continue;
       }
@@ -796,13 +804,22 @@ export async function startAgentLoop(opts: {
 }): Promise<void> {
   const { injector, kernelClient, agentId, workspacePath, mcpServers } = opts;
 
+  // Shared health state — updated by SDK loop, re-sent by heartbeat
+  const healthState: { status: "alive" | "busy" | "idle"; conversation?: string; sessionId?: string } = {
+    status: "alive",
+  };
+
   // Report initial health
   await kernelClient.reportHealth(agentId, "alive").catch(() => {});
 
-  // Heartbeat interval — reports "alive" so kernel knows agent is reachable
+  // Heartbeat interval — re-sends current status so Kernel knows agent is reachable
+  // and MCP server can poll for busy+conversation to drive typing
   const healthInterval = setInterval(async () => {
     try {
-      await kernelClient.reportHealth(agentId, "alive");
+      await kernelClient.reportHealth(agentId, healthState.status, {
+        sessionId: healthState.sessionId,
+        conversation: healthState.conversation,
+      });
     } catch {
       // Kernel may be temporarily unavailable
     }
@@ -816,7 +833,7 @@ export async function startAgentLoop(opts: {
       let nextAction: SessionAction = { type: "continue" };
       while (nextAction.type !== "exit") {
         logger.info({ action: nextAction }, "SDK: starting session");
-        nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, nextAction, mcpServers);
+        nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, nextAction, mcpServers, healthState);
         if (nextAction.type !== "exit") {
           logger.info({ nextAction }, "SDK: restarting with new session config");
         }
