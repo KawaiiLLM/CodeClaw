@@ -31,20 +31,29 @@ async function main() {
     logger.info({ port: config.kernel.port }, "Kernel HTTP API listening");
   });
 
-  // Create and start agent container
-  const { agent } = config;
-  try {
-    await containerManager.createAgent(agent.id, {
-      image: agent.image,
-      workspaceVolume: agent.workspaceVolume,
-      apiKeyEnv: agent.apiKeyEnv,
-      kernelUrl: `http://host.docker.internal:${config.kernel.port}`,
-    });
-    await containerManager.startAgent(agent.id);
-    supervisor.startMonitoring(agent.id);
-    logger.info({ agentId: agent.id }, "Agent container started and monitored");
-  } catch (err) {
-    logger.warn({ agentId: agent.id, err }, "Could not start agent container (Docker may not be available). Kernel running in API-only mode.");
+  // Create and start agent containers
+  const startedAgents: string[] = [];
+  for (const agent of config.agents) {
+    try {
+      await containerManager.createAgent(agent.id, {
+        image: agent.image,
+        volume: agent.volume,
+        port: agent.port,
+        kernelUrl: `http://host.docker.internal:${config.kernel.port}`,
+        envFile: agent.envFile,
+        extraEnv: agent.extraEnv,
+      });
+      await containerManager.startAgent(agent.id);
+      supervisor.startMonitoring(agent.id);
+      startedAgents.push(agent.id);
+      logger.info({ agentId: agent.id, port: agent.port }, "Agent container started and monitored");
+    } catch (err) {
+      logger.warn({ agentId: agent.id, err }, "Could not start agent container (Docker may not be available)");
+    }
+  }
+
+  if (startedAgents.length === 0) {
+    logger.warn("No agent containers started. Kernel running in API-only mode.");
   }
 
   // Periodic dedup cache cleanup
@@ -57,10 +66,12 @@ async function main() {
     logger.info("Shutting down...");
     supervisor.shutdown();
     server.close();
-    try {
-      await containerManager.stopAgent(agent.id);
-    } catch {
-      // Container may already be stopped
+    for (const agentId of startedAgents) {
+      try {
+        await containerManager.stopAgent(agentId);
+      } catch {
+        // Container may already be stopped
+      }
     }
     process.exit(0);
   };
@@ -68,7 +79,7 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  logger.info("CodeClaw Kernel ready");
+  logger.info({ agents: startedAgents }, "CodeClaw Kernel ready");
 }
 
 main().catch((err) => {

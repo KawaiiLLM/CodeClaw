@@ -3,9 +3,10 @@ import { logger } from "./logger.js";
 
 export interface AgentContainerConfig {
   image: string;
-  workspaceVolume: string;
-  apiKeyEnv: string;
+  volume: string;
   kernelUrl: string;
+  port: number; // Host port to map to container's 7001
+  envFile?: string;
   extraEnv?: Record<string, string>;
   networkMode?: string;
 }
@@ -66,18 +67,31 @@ export class ContainerManager {
     }
 
     const env = [
-      `ANTHROPIC_API_KEY=${process.env[config.apiKeyEnv] ?? process.env.ANTHROPIC_API_KEY ?? ""}`,
       `KERNEL_URL=${config.kernelUrl}`,
       `AGENT_ID=${agentId}`,
       ...Object.entries(config.extraEnv ?? {}).map(([k, v]) => `${k}=${v}`),
     ];
+
+    // Read env file if specified (contains API keys etc.)
+    if (config.envFile) {
+      try {
+        const { readFileSync } = await import("node:fs");
+        const lines = readFileSync(config.envFile, "utf-8")
+          .split("\n")
+          .map((l) => l.trim())
+          .filter((l) => l && !l.startsWith("#"));
+        env.push(...lines);
+      } catch (err) {
+        logger.warn({ agentId, envFile: config.envFile, err }, "Failed to read env file");
+      }
+    }
 
     const container = await this.docker.createContainer({
       name: containerName,
       Image: config.image,
       Env: env,
       HostConfig: {
-        Binds: [`${config.workspaceVolume}:/home/codeclaw`],
+        Binds: [`${config.volume}:/home/codeclaw`],
         NetworkMode: config.networkMode ?? "host",
         RestartPolicy: { Name: "unless-stopped" },
       },
