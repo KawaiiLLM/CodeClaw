@@ -63,11 +63,11 @@ export function createHttpServer(deps: ServerDeps) {
       },
 
       "/api/services/unregister": async (body) => {
-        const { skillId } = body as { skillId: string };
+        const { skillId, agentId } = body as { skillId: string; agentId?: string };
         if (!skillId) {
           throw new HttpError(400, "Missing required field: skillId");
         }
-        ioBridge.unregisterService(skillId);
+        ioBridge.unregisterService(skillId, agentId);
         return { success: true };
       },
 

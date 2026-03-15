@@ -31,6 +31,7 @@ export interface InboundMessage {
 
 export interface OutboundMessage {
   channel: string;
+  agentId?: string; // Which agent is sending (for multi-agent routing)
   conversation: string;
   content: MessageContent;
   replyTo?: string;
