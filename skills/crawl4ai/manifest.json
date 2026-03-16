@@ -1,0 +1,6 @@
+{
+  "skillId": "crawl4ai",
+  "type": "tool",
+  "mcpEntrypoint": "/codeclaw/skills/crawl4ai/mcp-server.ts",
+  "capabilities": ["web_crawl"]
+}
