@@ -4,12 +4,15 @@ set -euo pipefail
 # CodeClaw Agent 部署脚本
 # 用法:
 #   ./scripts/deploy.sh [--build] [--logs] [AGENT_ID]
-#   ./scripts/deploy.sh --build andy        # 构建并部署 andy
-#   ./scripts/deploy.sh bob                 # 部署 bob（不构建）
+#   ./scripts/deploy.sh --build anon        # 构建并部署 anon
+#   ./scripts/deploy.sh sakiko              # 部署 sakiko（不构建）
 
 IMAGE="codeclaw/agent-runtime:dev"
-DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
-export DOCKER_HOST
+
+# Auto-detect Docker: Colima (macOS) or native (Linux)
+if [ -S "$HOME/.colima/default/docker.sock" ]; then
+  export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
+fi
 
 # --- 参数解析 ---
 BUILD=false
@@ -24,15 +27,10 @@ for arg in "$@"; do
   esac
 done
 
-AGENT_ID="${AGENT_ID:-andy}"
+AGENT_ID="${AGENT_ID:-anon}"
 CONTAINER_NAME="codeclaw-agent-${AGENT_ID}"
 VOLUME="${DEPLOY_VOLUME:-codeclaw-${AGENT_ID}-home}"
 ENV_FILE="$HOME/.claude/config/agent-${AGENT_ID}.env"
-
-# Fallback to legacy env file for 'andy'
-if [ ! -f "$ENV_FILE" ] && [ "$AGENT_ID" = "andy" ]; then
-  ENV_FILE="$HOME/.claude/config/agent.env"
-fi
 
 # --- 前置检查 ---
 if [ ! -f "$ENV_FILE" ]; then
@@ -42,8 +40,7 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 if ! docker info >/dev/null 2>&1; then
-  echo "ERROR: Docker not available. Is Colima running?"
-  echo "  colima start"
+  echo "ERROR: Docker not available"
   exit 1
 fi
 
@@ -65,22 +62,31 @@ if docker ps -q --filter "name=$CONTAINER_NAME" | grep -q .; then
 fi
 docker rm "$CONTAINER_NAME" 2>/dev/null || true
 
-# --- 端口映射（andy=7001, 其他通过 DEPLOY_PORT 指定）---
+# --- 端口映射（anon=7001, 其他通过 DEPLOY_PORT 指定）---
 PORT="${DEPLOY_PORT:-7001}"
+
+# --- 环境变量 ---
+# HTTP_PROXY: only set if running behind a firewall (e.g. China mainland)
+EXTRA_ENV=()
+if [ -n "${HTTP_PROXY:-}" ]; then
+  EXTRA_ENV+=(-e "HTTP_PROXY=$HTTP_PROXY")
+fi
 
 # --- 启动 ---
 echo "==> Starting $CONTAINER_NAME (agent=$AGENT_ID, port=$PORT)..."
 docker run -d \
   --name "$CONTAINER_NAME" \
+  --restart unless-stopped \
   --env-file "$ENV_FILE" \
   -e KERNEL_URL=http://host.docker.internal:19000 \
   -e AGENT_ID="$AGENT_ID" \
   -e CLAUDE_MODEL=aws-claude-opus-4-6 \
-  -e HTTP_PROXY=http://host.docker.internal:7890 \
   -e CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
   -e SKILL_HOST_PORT="$PORT" \
+  "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
   -v "$VOLUME":/home/codeclaw \
   -p "$PORT":7001 \
+  --add-host=host.docker.internal:host-gateway \
   "$IMAGE"
 
 # --- 验证 ---

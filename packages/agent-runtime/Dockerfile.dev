@@ -7,7 +7,8 @@ RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debi
 
 # Install common tools
 RUN apt-get update && apt-get install -y \
-    git curl wget jq sqlite3 \
+    git curl wget jq sqlite3 sudo \
+    python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 # Use npmmirror for faster npm downloads in China
@@ -30,6 +31,7 @@ RUN npm install -g pnpm && pnpm config set registry https://registry.npmmirror.c
 # Create non-root user with explicit UID (Claude Code SDK refuses bypassPermissions as root)
 RUN userdel -r node && \
     useradd -u 1000 -m -s /bin/bash codeclaw && \
+    echo 'codeclaw ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/codeclaw && \
     mkdir -p /home/codeclaw/.claude/skills /home/codeclaw/.claude/data /home/codeclaw/.claude/cache /home/codeclaw/.claude/memory /home/codeclaw/.claude/config && \
     ln -s /codeclaw/skills/telegram /home/codeclaw/.claude/skills/telegram && \
     chown -R codeclaw:codeclaw /home/codeclaw

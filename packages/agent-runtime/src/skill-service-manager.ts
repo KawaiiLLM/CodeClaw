@@ -141,7 +141,7 @@ export class SkillServiceManager {
     });
 
     child.stdout?.on("data", (data: Buffer) => {
-      logger.debug({ skillId }, data.toString().trim());
+      logger.info({ skillId }, data.toString().trim());
     });
 
     child.stderr?.on("data", (data: Buffer) => {
