@@ -757,7 +757,8 @@ async function main() {
   // --- Unified message handler ---
 
   bot.on("message", async (ctx) => {
-    if (!ctx.from || (!ctx.from.is_bot && !isUserAllowed(ctx.from.id))) return;
+    if (!ctx.from || ctx.from.id === bot.botInfo.id) return;
+    if (!ctx.from.is_bot && !isUserAllowed(ctx.from.id)) return;
 
     const msg = ctx.message;
     const chatId = String(ctx.chat.id);
