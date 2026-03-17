@@ -24,8 +24,8 @@ export function buildDiaryTrigger(): InboundMessage {
 }
 
 /** Build the diary prompt message (injected as first message of the diary session). */
-export function buildDiaryMessage(): InboundMessage {
-  const date = getYesterdayStr();
+export function buildDiaryMessage(overrideDate?: string): InboundMessage {
+  const date = overrideDate ?? getYesterdayStr();
   const prompt = `[System] Daily diary task.
 
 Date to review: ${date}

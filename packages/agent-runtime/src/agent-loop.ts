@@ -87,7 +87,7 @@ type SessionAction =
   | { type: "continue" }     // continue most recent session (default on startup)
   | { type: "new" }          // start a fresh session
   | { type: "resume"; sessionId: string }  // resume a specific session
-  | { type: "diary"; resumeSessionId: string }  // run diary in new session, then resume
+  | { type: "diary"; resumeSessionId: string; date?: string }  // run diary in new session, then resume
   | { type: "exit" };        // shut down
 
 // --- SDK mode: full Claude Code agent via Agent SDK ---
@@ -458,8 +458,9 @@ async function runSdkLoop(
     }
 
     if (cmd === "/diary") {
-      logger.info({ sessionId }, "Runtime: diary trigger received, switching to diary session");
-      pendingAction = { type: "diary", resumeSessionId: sessionId };
+      const diaryDate = args.trim() || undefined; // optional YYYY-MM-DD
+      logger.info({ sessionId, diaryDate }, "Runtime: diary trigger received, switching to diary session");
+      pendingAction = { type: "diary", resumeSessionId: sessionId, date: diaryDate };
       try { await q.interrupt(); } catch { /* best effort */ }
       return true;
     }
@@ -875,8 +876,8 @@ export async function startAgentLoop(opts: {
         // Diary session: start a new session with the diary prompt, auto-return when done
         if (nextAction.type === "diary") {
           const resumeId = nextAction.resumeSessionId;
-          logger.info({ resumeSessionId: resumeId }, "SDK: starting diary session");
-          injector.push(buildDiaryMessage());
+          logger.info({ resumeSessionId: resumeId, date: nextAction.date }, "SDK: starting diary session");
+          injector.push(buildDiaryMessage(nextAction.date));
           const returnAction: SessionAction = resumeId
             ? { type: "resume", sessionId: resumeId }
             : { type: "continue" };
