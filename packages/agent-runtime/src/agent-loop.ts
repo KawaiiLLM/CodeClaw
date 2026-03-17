@@ -6,6 +6,7 @@ import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { MessageInjector } from "./message-injector.js";
 import { KernelClient } from "./kernel-client.js";
 import { logger } from "./logger.js";
+import { buildDiaryTrigger, buildDiaryMessage, scheduleDiaryTimer } from "./diary.js";
 
 // --- SDK dynamic import ---
 
@@ -86,6 +87,7 @@ type SessionAction =
   | { type: "continue" }     // continue most recent session (default on startup)
   | { type: "new" }          // start a fresh session
   | { type: "resume"; sessionId: string }  // resume a specific session
+  | { type: "diary"; resumeSessionId: string }  // run diary in new session, then resume
   | { type: "exit" };        // shut down
 
 // --- SDK mode: full Claude Code agent via Agent SDK ---
@@ -239,6 +241,7 @@ async function runSdkLoop(
   sessionConfig: SessionAction,
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>,
   healthState: { status: "alive" | "busy" | "idle"; conversation?: string; sessionId?: string },
+  autoReturnAction?: SessionAction,
 ): Promise<SessionAction> {
   const model = process.env.CLAUDE_MODEL ?? "aws-claude-opus-4-6";
   const baseURL = process.env.ANTHROPIC_BASE_URL;
@@ -454,6 +457,13 @@ async function runSdkLoop(
       return true;
     }
 
+    if (cmd === "/diary") {
+      logger.info({ sessionId }, "Runtime: diary trigger received, switching to diary session");
+      pendingAction = { type: "diary", resumeSessionId: sessionId };
+      try { await q.interrupt(); } catch { /* best effort */ }
+      return true;
+    }
+
     // Not a runtime command — let it pass through to SDK
     return false;
   }
@@ -597,6 +607,12 @@ async function runSdkLoop(
               }).catch(() => {});
             }
           }
+        }
+
+        // Auto-return after first result in diary/single-turn mode
+        if (autoReturnAction && !pendingAction) {
+          logger.info({ autoReturnAction }, "SDK: auto-returning after single-turn session");
+          pendingAction = autoReturnAction;
         }
 
         // Check if a session switch was requested (set by /session command before interrupt)
@@ -840,13 +856,34 @@ export async function startAgentLoop(opts: {
     }
   }, 10_000);
 
+  // Daily diary timer (SDK mode only, fires daily at DIARY_HOUR in DIARY_TIMEZONE)
+  let cleanupDiary: (() => void) | undefined;
+
   try {
     const mode = detectMode();
 
     if (mode === "sdk") {
+      // Schedule diary timer — pushes a /diary trigger into the injector queue
+      cleanupDiary = scheduleDiaryTimer(() => {
+        logger.info("Diary: injecting trigger");
+        injector.push(buildDiaryTrigger());
+      });
+
       // Restartable SDK loop: each iteration is one session
       let nextAction: SessionAction = { type: "continue" };
       while (nextAction.type !== "exit") {
+        // Diary session: start a new session with the diary prompt, auto-return when done
+        if (nextAction.type === "diary") {
+          const resumeId = nextAction.resumeSessionId;
+          logger.info({ resumeSessionId: resumeId }, "SDK: starting diary session");
+          injector.push(buildDiaryMessage());
+          const returnAction: SessionAction = resumeId
+            ? { type: "resume", sessionId: resumeId }
+            : { type: "continue" };
+          nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, { type: "new" }, mcpServers, healthState, returnAction);
+          continue;
+        }
+
         logger.info({ action: nextAction }, "SDK: starting session");
         nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, nextAction, mcpServers, healthState);
         if (nextAction.type !== "exit") {
@@ -859,6 +896,7 @@ export async function startAgentLoop(opts: {
       await runStubLoop(injector, kernelClient, agentId);
     }
   } finally {
+    cleanupDiary?.();
     clearInterval(healthInterval);
   }
 }
