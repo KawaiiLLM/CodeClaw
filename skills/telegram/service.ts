@@ -2,7 +2,7 @@ import { readFileSync, existsSync, mkdirSync, appendFileSync, writeFileSync } fr
 import { join } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, InlineKeyboard, InputFile } from "grammy";
 
 // --- Proxy support (for environments behind a firewall) ---
 
@@ -134,14 +134,15 @@ function buildNotificationHeader(
   senderName: string,
   seq: number,
   tgMsgId: number,
-  reply?: ReplyContent,
+  opts?: { reply?: ReplyContent; mentioned?: boolean },
 ): string {
   const date = todayStr();
   const time = new Date().toLocaleTimeString("en-GB", { timeZone: "Asia/Shanghai", hour12: false });
-  let header = `[telegram/${chatId}] ${senderName} (${date} ${time} seq:${seq} msgId:${tgMsgId})`;
-  if (reply) {
-    header += `\n  reply-to:${reply.ref}`;
-    header += `\n  > ${reply.preview}`;
+  const mentionTag = opts?.mentioned != null ? ` mentioned:${opts.mentioned}` : "";
+  let header = `[telegram/${chatId}] ${senderName} (${date} ${time} seq:${seq} msgId:${tgMsgId}${mentionTag})`;
+  if (opts?.reply) {
+    header += `\n  reply-to:${opts.reply.ref}`;
+    header += `\n  > ${opts.reply.preview}`;
   }
   header += `\n  -> ~/.claude/data/telegram/${date}/${chatId}.jsonl`;
   return header;
@@ -452,6 +453,148 @@ async function main() {
     return { buf: Buffer.from(await res.arrayBuffer()), filePath: file.file_path! };
   }
 
+  // --- Inbound message buffering (debounce, media group, text fragment) ---
+
+  interface BufferedTextEntry {
+    text: string;
+    chatId: string;
+    tgMsgId: number;
+    seq: number;
+    timestamp: number;
+    sender: { id: string; name: string; channel: string };
+    conversation: { id: string; type: "dm" | "group"; title?: string };
+    replyContent?: ReplyContent;
+    mentioned?: boolean;
+  }
+
+  const DEBOUNCE_MS = 300;
+  const MEDIA_GROUP_MS = 500;
+  const FRAGMENT_GAP_MS = 1500;
+  const FRAGMENT_THRESHOLD = 4000;
+  const FRAGMENT_MAX_PARTS = 12;
+
+  // Text debounce: merge consecutive text messages from same sender in same chat
+  const textDebounceBuffers = new Map<string, { entries: BufferedTextEntry[]; timer: ReturnType<typeof setTimeout> }>();
+
+  function debounceText(entry: BufferedTextEntry, onFlush: (merged: BufferedTextEntry) => void): void {
+    const key = `${entry.chatId}:${entry.sender.id}`;
+    const existing = textDebounceBuffers.get(key);
+    if (existing) {
+      existing.entries.push(entry);
+      clearTimeout(existing.timer);
+    } else {
+      textDebounceBuffers.set(key, { entries: [entry], timer: null as any });
+    }
+    const buf = textDebounceBuffers.get(key)!;
+    buf.timer = setTimeout(() => {
+      textDebounceBuffers.delete(key);
+      const entries = buf.entries;
+      const last = entries[entries.length - 1];
+      onFlush({
+        ...last,
+        text: entries.map(e => e.text).join("\n"),
+        replyContent: entries[0].replyContent,
+        mentioned: entries.some(e => e.mentioned === true) ? true : last.mentioned,
+      });
+    }, DEBOUNCE_MS);
+  }
+
+  // Media group: merge multi-photo messages sharing media_group_id
+  interface MediaGroupEntry {
+    chatId: string;
+    tgMsgId: number;
+    seq: number;
+    timestamp: number;
+    sender: { id: string; name: string; channel: string };
+    conversation: { id: string; type: "dm" | "group"; title?: string };
+    replyContent?: ReplyContent;
+    mentioned?: boolean;
+    caption: string;
+    imageData: string; // base64
+    imageMimeType: string;
+  }
+
+  const mediaGroupBuffers = new Map<string, { entries: MediaGroupEntry[]; timer: ReturnType<typeof setTimeout> }>();
+
+  function bufferMediaGroup(
+    groupId: string,
+    entry: MediaGroupEntry,
+    onFlush: (entries: MediaGroupEntry[]) => void,
+  ): void {
+    const existing = mediaGroupBuffers.get(groupId);
+    if (existing) {
+      existing.entries.push(entry);
+      clearTimeout(existing.timer);
+    } else {
+      mediaGroupBuffers.set(groupId, { entries: [entry], timer: null as any });
+    }
+    const buf = mediaGroupBuffers.get(groupId)!;
+    buf.timer = setTimeout(() => {
+      mediaGroupBuffers.delete(groupId);
+      onFlush(buf.entries);
+    }, MEDIA_GROUP_MS);
+  }
+
+  // Text fragment: reassemble long pastes split by Telegram (>4096 chars)
+  const fragmentBuffers = new Map<string, {
+    entries: BufferedTextEntry[];
+    lastMsgId: number;
+    lastTs: number;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+
+  function bufferFragment(
+    entry: BufferedTextEntry,
+    onFlush: (merged: BufferedTextEntry) => void,
+  ): boolean {
+    const key = `${entry.chatId}:${entry.sender.id}:fragment`;
+    const existing = fragmentBuffers.get(key);
+
+    // Check if this continues an existing fragment
+    if (existing) {
+      const gap = entry.timestamp - existing.lastTs;
+      const consecutive = entry.tgMsgId === existing.lastMsgId + 1;
+      if (consecutive && gap < FRAGMENT_GAP_MS && existing.entries.length < FRAGMENT_MAX_PARTS) {
+        existing.entries.push(entry);
+        existing.lastMsgId = entry.tgMsgId;
+        existing.lastTs = entry.timestamp;
+        clearTimeout(existing.timer);
+        existing.timer = setTimeout(() => flushFragment(key, onFlush), FRAGMENT_GAP_MS);
+        return true; // consumed
+      }
+      // Not a continuation — flush previous, don't consume current
+      clearTimeout(existing.timer);
+      flushFragment(key, onFlush);
+    }
+
+    // Start new fragment buffer if this message is long enough
+    if (entry.text.length >= FRAGMENT_THRESHOLD) {
+      fragmentBuffers.set(key, {
+        entries: [entry],
+        lastMsgId: entry.tgMsgId,
+        lastTs: entry.timestamp,
+        timer: setTimeout(() => flushFragment(key, onFlush), FRAGMENT_GAP_MS),
+      });
+      return true; // consumed
+    }
+
+    return false; // not consumed, handle normally
+  }
+
+  function flushFragment(key: string, onFlush: (merged: BufferedTextEntry) => void): void {
+    const buf = fragmentBuffers.get(key);
+    if (!buf) return;
+    fragmentBuffers.delete(key);
+    const entries = buf.entries;
+    const last = entries[entries.length - 1];
+    onFlush({
+      ...last,
+      text: entries.map(e => e.text).join(""),
+      replyContent: entries[0].replyContent,
+      mentioned: entries.some(e => e.mentioned === true) ? true : last.mentioned,
+    });
+  }
+
   /** Resolve reply-to message content for inline embedding in notification. */
   async function resolveReplyContent(
     chatId: string,
@@ -518,6 +661,26 @@ async function main() {
   const chatActionBreaker = new ChatActionCircuitBreaker();
 
   // --- Skill-level slash command handler ---
+
+  // --- ACK reaction tracking ---
+  // Track the latest message we ACK'd per chat, so we can remove it when replying.
+  const pendingAcks = new Map<string, number>(); // chatId → tgMsgId
+
+  async function setAck(chatId: string, tgMsgId: number): Promise<void> {
+    try {
+      await bot.api.setMessageReaction(chatId, tgMsgId, [{ type: "emoji", emoji: "👀" } as any]);
+      pendingAcks.set(chatId, tgMsgId);
+    } catch { /* some chats don't support reactions */ }
+  }
+
+  async function clearAck(chatId: string): Promise<void> {
+    const msgId = pendingAcks.get(chatId);
+    if (!msgId) return;
+    pendingAcks.delete(chatId);
+    try {
+      await bot.api.setMessageReaction(chatId, msgId, []);
+    } catch { /* ignore */ }
+  }
 
   async function handleSkillCommand(cmd: string, args: string, chatId: string, replyToMsgId: number) {
     try {
@@ -609,6 +772,8 @@ async function main() {
     if (msg.reply_to_message) {
       replyContent = await resolveReplyContent(chatId, msg.reply_to_message as any);
     }
+    const mentioned = isGroup ? isDirectlyAddressed(ctx) : undefined;
+    const headerOpts = { reply: replyContent, mentioned };
 
     // --- Persist + build kernel content ---
     const logBase: Record<string, unknown> = {
@@ -665,15 +830,48 @@ async function main() {
           return;
         }
 
-        // --- Normal text message handling ---
-        seq = appendToLog(chatId, { ...logBase, type: "text", text: msg.text });
-        const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyContent);
+        // --- Normal text message handling (debounced + fragment-aware) ---
+        // JSONL write is deferred to flush callback so merged text gets a single record.
 
-        if (text.length <= PREVIEW_LIMIT) {
-          kernelContent = { type: "text", text: `${header}\n${text}` };
-        } else {
-          kernelContent = { type: "text", text: `${header}\n${safeSlice(text, 100)}...\n  (full text in JSONL at seq:${seq})` };
+        // Group check: skip debounce path for messages that won't be forwarded
+        if (isGroup && !isDirectlyAddressed(ctx) && !isWatched(chatId)) {
+          appendToLog(chatId, { ...logBase, type: "text", text: msg.text });
+          return;
         }
+        if (isGroup && isDirectlyAddressed(ctx)) {
+          watchMap.set(chatId, Date.now() + DEFAULT_WATCH_MINUTES * 60_000);
+        }
+
+        const entry: BufferedTextEntry = {
+          text, chatId, tgMsgId, seq: -1, timestamp,
+          sender, conversation,
+          replyContent, mentioned,
+        };
+
+        const flushTextEntry = (merged: BufferedTextEntry) => {
+          // Write merged text as a single JSONL record
+          const mergedSeq = appendToLog(merged.chatId, { ...logBase, type: "text", text: merged.text });
+          const hOpts = { reply: merged.replyContent, mentioned: merged.mentioned };
+          const header = buildNotificationHeader(merged.chatId, merged.sender.name, mergedSeq, merged.tgMsgId, hOpts);
+          let content: { type: "text"; text: string } | { type: "image"; data: string; mimeType: string; caption: string };
+          if (merged.text.length <= PREVIEW_LIMIT) {
+            content = { type: "text", text: `${header}\n${merged.text}` };
+          } else {
+            content = { type: "text", text: `${header}\n${safeSlice(merged.text, 100)}...\n  (full text in JSONL)` };
+          }
+          // Inline reply image upgrade
+          if (merged.replyContent?.image && content.type === "text") {
+            content = { type: "image", data: merged.replyContent.image.data, mimeType: merged.replyContent.image.mimeType, caption: content.text };
+          }
+          void doForwardToKernel(merged.chatId, merged.tgMsgId, merged.sender, merged.conversation, content, merged.timestamp);
+        };
+
+        // Try text fragment buffer first (long paste reassembly)
+        if (!bufferFragment(entry, flushTextEntry)) {
+          // Not a fragment — go through debounce
+          debounceText(entry, flushTextEntry);
+        }
+        return; // handled by debounce/fragment flush callback
 
       } else if (msg.photo) {
         const largest = msg.photo[msg.photo.length - 1];
@@ -686,12 +884,39 @@ async function main() {
           const ext = mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
           const { relPath } = saveFile(chatId, `${tgMsgId}_photo.${ext}`, buf);
           seq = appendToLog(chatId, { ...logBase, type: "image", fileId: largest.file_id, path: relPath, caption: caption || null });
-          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyContent);
+
+          // Media group: buffer multiple photos sent together
+          const mediaGroupId = (msg as any).media_group_id as string | undefined;
+          if (mediaGroupId) {
+            const mgEntry: MediaGroupEntry = {
+              chatId, tgMsgId, seq, timestamp, sender, conversation,
+              replyContent, mentioned,
+              caption, imageData: buf.toString("base64"), imageMimeType: mimeType,
+            };
+            bufferMediaGroup(mediaGroupId, mgEntry, (entries) => {
+              // Flush: send first image as image content, note total count in caption
+              if (isGroup && !entries.some(e => e.mentioned === true) && !isWatched(chatId)) return;
+              const first = entries[0];
+              const last = entries[entries.length - 1];
+              const hOpts = { reply: first.replyContent, mentioned: entries.some(e => e.mentioned === true) ? true : first.mentioned };
+              const header = buildNotificationHeader(last.chatId, last.sender.name, last.seq, last.tgMsgId, hOpts);
+              const countNote = entries.length > 1 ? `\n[${entries.length}张图片]` : "";
+              const captionNote = first.caption ? `\n${first.caption}` : "";
+              const content: { type: "image"; data: string; mimeType: string; caption: string } = {
+                type: "image", data: first.imageData, mimeType: first.imageMimeType,
+                caption: `${header}${countNote}${captionNote}`,
+              };
+              void doForwardToKernel(last.chatId, last.tgMsgId, last.sender, last.conversation, content, last.timestamp);
+            });
+            return; // handled by media group flush
+          }
+
+          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, headerOpts);
           kernelContent = { type: "image", data: buf.toString("base64"), mimeType, caption: `${header}${caption ? `\n${caption}` : ""}` };
         } catch (err) {
           console.error("[telegram] Failed to download photo:", err);
           seq = appendToLog(chatId, { ...logBase, type: "image", fileId: largest.file_id, caption: caption || null });
-          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyContent);
+          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, headerOpts);
           kernelContent = { type: "text", text: `${header}\n[图片${caption ? `: ${caption}` : ""}]` };
         }
 
@@ -706,7 +931,7 @@ async function main() {
           const ext = sticker.is_animated ? "tgs" : sticker.is_video ? "webm" : "webp";
           const { relPath } = saveFile(chatId, `${tgMsgId}_sticker.${ext}`, buf);
           seq = appendToLog(chatId, { ...logBase, type: "sticker", fileId: sticker.file_id, path: relPath, emoji: sticker.emoji ?? null, setName: sticker.set_name ?? null });
-          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyContent);
+          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, headerOpts);
 
           if (isStatic) {
             kernelContent = { type: "image", data: buf.toString("base64"), mimeType: "image/webp", caption: `${header}\n[贴纸${emojiLabel}]` };
@@ -715,7 +940,7 @@ async function main() {
           }
         } catch {
           seq = appendToLog(chatId, { ...logBase, type: "sticker", fileId: sticker.file_id, emoji: sticker.emoji ?? null, setName: sticker.set_name ?? null });
-          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyContent);
+          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, headerOpts);
           kernelContent = { type: "text", text: `${header}\n[贴纸${emojiLabel}]` };
         }
 
@@ -729,11 +954,11 @@ async function main() {
           const { buf } = await downloadTelegramFile(doc.file_id);
           const { relPath } = saveFile(chatId, `${tgMsgId}_${fileName}`, buf);
           seq = appendToLog(chatId, { ...logBase, type: "file", filename: fileName, path: relPath, size: buf.length, mimeType: doc.mime_type ?? null, caption: caption || null });
-          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyContent);
+          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, headerOpts);
           kernelContent = { type: "text", text: `${header}\n[文件: ${fileName}, ${formatSize(buf.length)}${caption ? `, "${caption}"` : ""}]` };
         } catch {
           seq = appendToLog(chatId, { ...logBase, type: "file", filename: fileName, mimeType: doc.mime_type ?? null, caption: caption || null });
-          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyContent);
+          const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, headerOpts);
           kernelContent = { type: "text", text: `${header}\n[文件: ${fileName}${caption ? `, "${caption}"` : ""}]` };
         }
 
@@ -749,12 +974,12 @@ async function main() {
         } catch {
           seq = appendToLog(chatId, { ...logBase, type: "audio", duration: audio.duration ?? null });
         }
-        const header = buildNotificationHeader(chatId, sender.name, seq!, tgMsgId, replyContent);
+        const header = buildNotificationHeader(chatId, sender.name, seq!, tgMsgId, headerOpts);
         kernelContent = { type: "text", text: `${header}\n[语音消息${durStr}]` };
 
       } else {
         seq = appendToLog(chatId, { ...logBase, type: "other" });
-        const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, replyContent);
+        const header = buildNotificationHeader(chatId, sender.name, seq, tgMsgId, headerOpts);
         kernelContent = { type: "text", text: `${header}\n[不支持的消息类型]` };
       }
     } catch (err) {
@@ -781,7 +1006,19 @@ async function main() {
     }
     if (!kernelContent) return;
 
-    // --- Forward standard InboundMessage to Kernel (no extra fields) ---
+    // --- Forward to Kernel (direct or deferred via debounce) ---
+    await doForwardToKernel(chatId, tgMsgId, sender, conversation, kernelContent, timestamp);
+  });
+
+  /** Common forwarding path used by both direct handler and debounce flush. */
+  async function doForwardToKernel(
+    chatId: string,
+    tgMsgId: number,
+    sender: { id: string; name: string; channel: string },
+    conversation: { id: string; type: "dm" | "group"; title?: string },
+    content: { type: "text"; text: string } | { type: "image"; data: string; mimeType: string; caption: string },
+    timestamp: number,
+  ): Promise<void> {
     try {
       await forwardToKernel({
         id: `tg_${chatId}_${tgMsgId}`,
@@ -789,14 +1026,15 @@ async function main() {
         agentId: AGENT_ID,
         sender,
         conversation,
-        content: kernelContent,
+        content,
         timestamp,
       });
-      console.log(`[telegram] Forwarded ${kernelContent.type} from ${sender.name} (seq:${seq!})`);
+      console.log(`[telegram] Forwarded ${content.type} from ${sender.name} (tgMsgId:${tgMsgId})`);
+      void setAck(chatId, tgMsgId);
     } catch (err) {
       console.error("[telegram] Failed to forward to kernel:", err);
     }
-  });
+  }
 
   // --- Inline keyboard callback handler (model selection) ---
 
@@ -848,7 +1086,7 @@ async function main() {
         const body = await parseBody(req);
         const { conversation, content, replyTo, editMessageId, progress } = body as {
           conversation: string;
-          content: { type: string; text: string };
+          content: { type: string; text?: string; data?: string; mimeType?: string; caption?: string; filename?: string };
           replyTo?: string;
           editMessageId?: string;
           progress?: boolean;
@@ -865,10 +1103,13 @@ async function main() {
             sendJson(res, 400, { error: "Invalid editMessageId" });
             return;
           }
-          await bot.api.editMessageText(conversation, msgId, content.text);
+          await bot.api.editMessageText(conversation, msgId, content.text!);
           sendJson(res, 200, { success: true });
           return;
         }
+
+        // Clear ACK reaction before sending actual reply (not progress updates)
+        if (!progress) void clearAck(conversation);
 
         // Send path
         if (content.type === "text") {
@@ -880,7 +1121,8 @@ async function main() {
             if (!isNaN(parsed)) replyMsgId = parsed;
           }
 
-          const sent = await bot.api.sendMessage(conversation, content.text, {
+          const text = content.text!;
+          const sent = await bot.api.sendMessage(conversation, text, {
             ...(replyMsgId ? { reply_parameters: { message_id: replyMsgId } } : {}),
           });
 
@@ -891,15 +1133,53 @@ async function main() {
               tgMsgId: sent.message_id,
               sender: { id: "bot", name: "Agent" },
               type: "text",
-              text: content.text,
+              text,
               ...(replyMsgId ? { replyToTgMsgId: replyMsgId } : {}),
             });
-            broadcastToOtherAgents(conversation, content.text, sent.message_id);
+            broadcastToOtherAgents(conversation, text, sent.message_id);
             sendJson(res, 200, { success: true, messageId: sent.message_id, seq: outSeq });
           } else {
             sendJson(res, 200, { success: true, messageId: sent.message_id });
           }
 
+          return;
+        }
+
+        if (content.type === "image") {
+          const { mimeType, caption } = content;
+          const buf = Buffer.from(content.data!, "base64");
+          const ext = mimeType?.split("/")[1] ?? "jpg";
+          const inputFile = new InputFile(buf, `image.${ext}`);
+          const sent = await bot.api.sendPhoto(conversation, inputFile, {
+            ...(caption ? { caption } : {}),
+          });
+          const outSeq = appendToLog(conversation, {
+            ts: Date.now(),
+            tgMsgId: sent.message_id,
+            sender: { id: "bot", name: "Agent" },
+            type: "image",
+            caption: caption ?? "",
+          });
+          sendJson(res, 200, { success: true, messageId: sent.message_id, seq: outSeq });
+          return;
+        }
+
+        if (content.type === "file") {
+          const { filename, mimeType, caption } = content;
+          const buf = Buffer.from(content.data!, "base64");
+          const inputFile = new InputFile(buf, filename ?? "file");
+          const sent = await bot.api.sendDocument(conversation, inputFile, {
+            ...(caption ? { caption } : {}),
+          });
+          const outSeq = appendToLog(conversation, {
+            ts: Date.now(),
+            tgMsgId: sent.message_id,
+            sender: { id: "bot", name: "Agent" },
+            type: "file",
+            filename: filename ?? "file",
+            caption: caption ?? "",
+          });
+          sendJson(res, 200, { success: true, messageId: sent.message_id, seq: outSeq });
           return;
         }
 
@@ -1050,8 +1330,9 @@ async function main() {
     } else if (req.method === "POST" && req.url === "/get_message") {
       try {
         const body = await parseBody(req);
-        const { conversation, date, seq, messageId } = body as {
+        const { conversation, date, seq, messageId, before, after, attachments: wantAttachments } = body as {
           conversation: string; date: string; seq?: number; messageId?: number;
+          before?: number; after?: number; attachments?: boolean;
         };
         if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^-?\d+$/.test(conversation)) {
           sendJson(res, 400, { error: "Invalid date or conversation format" });
@@ -1064,45 +1345,92 @@ async function main() {
         }
         const lines = readFileSync(filePath, "utf-8").trimEnd().split("\n");
 
-        let record: Record<string, unknown> | null = null;
-        if (seq != null && seq < lines.length) {
-          // O(1) lookup: seq N is line N
-          try { record = JSON.parse(lines[seq]); } catch { /* fallthrough to scan */ }
+        const isRange = (before != null && before > 0) || (after != null && after > 0);
+        const hasAnchor = seq != null || messageId != null;
+
+        // --- Recent mode: no anchor, return tail ---
+        if (!hasAnchor) {
+          const count = Math.min(before ?? 20, 200);
+          const startIdx = Math.max(0, lines.length - count);
+          const records = lines.slice(startIdx).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+          sendJson(res, 200, { success: true, messages: records, total: lines.length });
+          return;
         }
-        if (!record) {
-          for (const line of lines) {
-            const parsed = JSON.parse(line);
-            if (seq != null && parsed.seq === seq) { record = parsed; break; }
-            if (messageId != null && parsed.tgMsgId === messageId) { record = parsed; break; }
+
+        // --- Find anchor record ---
+        let anchorIdx = -1;
+        if (seq != null && seq >= 0 && seq < lines.length) {
+          try { const p = JSON.parse(lines[seq]); if (p.seq === seq) anchorIdx = seq; } catch { /* fallthrough */ }
+        }
+        if (anchorIdx < 0) {
+          for (let i = 0; i < lines.length; i++) {
+            const parsed = JSON.parse(lines[i]);
+            if (seq != null && parsed.seq === seq) { anchorIdx = i; break; }
+            if (messageId != null && parsed.tgMsgId === messageId) { anchorIdx = i; break; }
           }
         }
 
-        if (!record) {
+        if (anchorIdx < 0) {
           sendJson(res, 404, { error: "Message not found" });
           return;
         }
 
-        // Package saved files as base64 attachments
-        const attachments: { mimeType: string; data: string }[] = [];
-        if (record.path && typeof record.path === "string") {
-          if ((record.path as string).includes("..")) {
-            sendJson(res, 400, { error: "Invalid path in record" });
-            return;
+        // --- Single message (backward compat) ---
+        if (!isRange) {
+          const record = JSON.parse(lines[anchorIdx]) as Record<string, unknown>;
+          const attachmentsList: { mimeType: string; data: string }[] = [];
+          if (record.path && typeof record.path === "string") {
+            if ((record.path as string).includes("..")) {
+              sendJson(res, 400, { error: "Invalid path in record" });
+              return;
+            }
+            const absPath = join(DATA_BASE, date, record.path as string);
+            if (existsSync(absPath)) {
+              const buf = readFileSync(absPath);
+              const ext = absPath.split(".").pop()?.toLowerCase() ?? "";
+              const mimeMap: Record<string, string> = {
+                jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+                webp: "image/webp", gif: "image/gif", ogg: "audio/ogg",
+                mp3: "audio/mpeg", webm: "video/webm",
+              };
+              attachmentsList.push({ mimeType: mimeMap[ext] ?? "application/octet-stream", data: buf.toString("base64") });
+            }
           }
-          const absPath = join(DATA_BASE, date, record.path as string);
-          if (existsSync(absPath)) {
-            const buf = readFileSync(absPath);
-            const ext = absPath.split(".").pop()?.toLowerCase() ?? "";
-            const mimeMap: Record<string, string> = {
-              jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
-              webp: "image/webp", gif: "image/gif", ogg: "audio/ogg",
-              mp3: "audio/mpeg", webm: "video/webm",
-            };
-            attachments.push({ mimeType: mimeMap[ext] ?? "application/octet-stream", data: buf.toString("base64") });
+          sendJson(res, 200, { success: true, message: record, attachments: attachmentsList });
+          return;
+        }
+
+        // --- Range mode: anchor ± before/after ---
+        const bCount = Math.min(before ?? 0, 200);
+        const aCount = Math.min(after ?? 0, 200);
+        const startIdx = Math.max(0, anchorIdx - bCount);
+        const endIdx = Math.min(lines.length - 1, anchorIdx + aCount);
+        const records = [];
+        for (let i = startIdx; i <= endIdx; i++) {
+          try { records.push(JSON.parse(lines[i])); } catch { /* skip */ }
+        }
+
+        // Optionally include attachments for each record
+        if (wantAttachments) {
+          const mimeMap: Record<string, string> = {
+            jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+            webp: "image/webp", gif: "image/gif", ogg: "audio/ogg",
+            mp3: "audio/mpeg", webm: "video/webm",
+          };
+          for (const rec of records) {
+            if (rec.path && typeof rec.path === "string" && !rec.path.includes("..")) {
+              const absPath = join(DATA_BASE, date, rec.path);
+              if (existsSync(absPath)) {
+                const buf = readFileSync(absPath);
+                const ext = absPath.split(".").pop()?.toLowerCase() ?? "";
+                rec._attachment = { mimeType: mimeMap[ext] ?? "application/octet-stream", data: buf.toString("base64") };
+              }
+            }
           }
         }
 
-        sendJson(res, 200, { success: true, message: record, attachments });
+        const anchorSeq = records[anchorIdx - startIdx]?.seq ?? anchorIdx;
+        sendJson(res, 200, { success: true, messages: records, anchorSeq, total: lines.length });
       } catch (err) {
         console.error("[telegram] Failed to get message:", err);
         sendJson(res, 500, { error: String(err) });

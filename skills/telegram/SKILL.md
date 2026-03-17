@@ -36,7 +36,10 @@ Tools are provided by the `telegram` MCP server (prefix: `mcp__telegram__`).
 
 ### History
 
-- `get_message` — Fetch a specific historical message by `date` + `seq` or `platformMessageId`.
+- `get_message` — Fetch messages from chat history. Three modes:
+  - **Single**: `seq` or `platformMessageId` → one message with attachments
+  - **Range**: `seq`/`platformMessageId` + `before`/`after` → anchor ± context (text only by default)
+  - **Recent**: omit `seq`/`platformMessageId`, set `before` (default 20) → latest N messages
 
 ## Chat History
 

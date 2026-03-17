@@ -246,39 +246,90 @@ server.tool(
 
 server.tool(
   "get_message",
-  "Fetch a specific message from chat history. Returns full content including images.",
+  [
+    "Fetch messages from chat history. Three modes:",
+    "1) Single message: provide seq or platformMessageId → returns message with image attachments",
+    "2) Context range: provide seq/platformMessageId + before/after → returns anchor message ± surrounding messages as text",
+    "3) Recent messages: omit seq and platformMessageId, optionally set before (default 20) → returns latest messages",
+  ].join("\n"),
   {
     channel: z.string().describe("Target channel"),
     conversation: z.string().describe("Conversation/chat ID"),
     date: z.string().describe("Date string (e.g. '2026-03-13')"),
     seq: z.number().optional().describe("Message seq number within that day's file"),
     platformMessageId: z.number().optional().describe("Platform-specific message ID (alternative to seq)"),
+    before: z.number().optional().describe("Include N messages before the anchor (or N recent messages if no anchor)"),
+    after: z.number().optional().describe("Include N messages after the anchor"),
+    attachments: z.boolean().optional().describe("Include base64 image attachments in range/recent mode (default false, always true for single message)"),
   },
-  async ({ channel, conversation, date, seq, platformMessageId }) => {
+  async ({ channel, conversation, date, seq, platformMessageId, before, after, attachments: wantAttachments }) => {
     try {
       const data = await sendOutbound({
         channel, conversation,
         skillEndpoint: "/get_message",
-        payload: { conversation, date, seq, messageId: platformMessageId },
-      }) as { error?: string; message: Record<string, any>; attachments: { mimeType: string; data: string }[] };
+        payload: { conversation, date, seq, messageId: platformMessageId, before, after, attachments: wantAttachments },
+      }) as {
+        error?: string;
+        message?: Record<string, any>;
+        messages?: Record<string, any>[];
+        attachments?: { mimeType: string; data: string }[];
+        anchorSeq?: number;
+        total?: number;
+      };
 
       if (data.error) return { content: [{ type: "text" as const, text: `Not found: ${data.error}` }], isError: true };
 
-      const blocks: any[] = [];
-      const msg = data.message;
-      const sender = msg.sender?.name ?? "Unknown";
-      blocks.push({ type: "text" as const, text: `[${date}/seq:${msg.seq}] ${sender} (${msg.type}):` });
-      if (msg.text) blocks.push({ type: "text" as const, text: String(msg.text) });
-      if (msg.caption) blocks.push({ type: "text" as const, text: String(msg.caption) });
-      for (const att of data.attachments) {
-        if (att.mimeType.startsWith("image/")) {
-          blocks.push({ type: "image" as const, data: att.data, mimeType: att.mimeType });
-        } else {
-          blocks.push({ type: "text" as const, text: `[attachment: ${att.mimeType}]` });
+      // --- Single message mode (backward compat) ---
+      if (data.message && !data.messages) {
+        const blocks: any[] = [];
+        const msg = data.message;
+        const sender = msg.sender?.name ?? "Unknown";
+        blocks.push({ type: "text" as const, text: `[${date}/seq:${msg.seq}] ${sender} (${msg.type}):` });
+        if (msg.text) blocks.push({ type: "text" as const, text: String(msg.text) });
+        if (msg.caption) blocks.push({ type: "text" as const, text: String(msg.caption) });
+        for (const att of data.attachments ?? []) {
+          if (att.mimeType.startsWith("image/")) {
+            blocks.push({ type: "image" as const, data: att.data, mimeType: att.mimeType });
+          } else {
+            blocks.push({ type: "text" as const, text: `[attachment: ${att.mimeType}]` });
+          }
         }
+        if (msg.emoji) blocks.push({ type: "text" as const, text: `emoji: ${msg.emoji}` });
+        return { content: blocks };
       }
-      if (msg.emoji) blocks.push({ type: "text" as const, text: `emoji: ${msg.emoji}` });
-      return { content: blocks };
+
+      // --- Multi-message mode ---
+      if (data.messages) {
+        const lines: string[] = [];
+        if (data.total != null) lines.push(`total messages on ${date}: ${data.total}`);
+        if (data.anchorSeq != null) lines.push(`anchor: seq ${data.anchorSeq}`);
+        lines.push("---");
+        for (const msg of data.messages) {
+          const sender = msg.sender?.name ?? "Unknown";
+          const time = msg.ts ? new Date(msg.ts).toLocaleTimeString("en-GB", { timeZone: "Asia/Shanghai", hour12: false }) : "";
+          let line = `[seq:${msg.seq} ${time}] ${sender}:`;
+          if (msg.text) line += ` ${String(msg.text).slice(0, 500)}`;
+          else if (msg.caption) line += ` [${msg.type}] ${String(msg.caption).slice(0, 300)}`;
+          else line += ` [${msg.type}]`;
+          if (msg.text && msg.text.length > 500) line += "…";
+          lines.push(line);
+        }
+        const blocks: any[] = [{ type: "text" as const, text: lines.join("\n") }];
+
+        // Include attachments if requested
+        if (wantAttachments) {
+          for (const msg of data.messages) {
+            if (msg._attachment?.mimeType?.startsWith("image/")) {
+              blocks.push({ type: "text" as const, text: `[attachment for seq:${msg.seq}]` });
+              blocks.push({ type: "image" as const, data: msg._attachment.data, mimeType: msg._attachment.mimeType });
+            }
+          }
+        }
+
+        return { content: blocks };
+      }
+
+      return { content: [{ type: "text" as const, text: "Unexpected response format" }], isError: true };
     } catch (err) {
       return { content: [{ type: "text" as const, text: `Failed: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
     }
