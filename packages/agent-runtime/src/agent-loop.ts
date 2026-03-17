@@ -509,7 +509,15 @@ async function runSdkLoop(
         lastMessage = msg;
 
         // Check for runtime commands
-        if (await handleRuntimeCommand(msg)) continue;
+        if (await handleRuntimeCommand(msg)) {
+          // If a session switch was requested while idle, end the stream to
+          // break the for-await loop (q.interrupt() is no-op without active turn)
+          if (pendingAction && healthState.status === "idle") {
+            stream.end();
+            break;
+          }
+          continue;
+        }
 
         // Check for SDK commands — push raw command text, not notification header
         const meta = (msg as any).metadata as { command?: string; raw?: string } | undefined;

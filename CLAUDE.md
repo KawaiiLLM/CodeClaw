@@ -17,6 +17,7 @@ Unix 微内核式个人 AI Agent 系统：Kernel (host) + Agent (Docker) + Skill
 
 ### 架构意识
 - CodeClaw 是微内核架构，**边界即法律**。Kernel、Agent Runtime、Skills 三者职责分离，不要为了"方便"而破坏隔离。如果一个改动需要跨越边界，这本身就值得讨论。
+- Kernel 是透明代理，不检查/转换消息内容，只负责路由。channel 特定逻辑归 Skill。
 - 每个决策都要考虑：这会增加系统复杂度吗？有没有更简单的做法？Unix 哲学——做一件事，做好它。
 
 ### 不要默默堆积技术债
@@ -33,17 +34,27 @@ Unix 微内核式个人 AI Agent 系统：Kernel (host) + Agent (Docker) + Skill
 - 对于项目已经在用的、你有充分把握的库（如 TypeScript 标准库、pnpm 命令、基础 Node.js API），直接写，不需要每次都调研。**诚实的关键是区分"我确实知道"和"我觉得我知道"。**
 
 ## 环境约束
-- **中国大陆网络**: 外网访问需 HTTP 代理 `127.0.0.1:7890`，Docker 容器内用 `host.docker.internal:7890`
-- **Docker**: Colima, socket 在 `~/.colima/default/docker.sock`, 需设 `DOCKER_HOST`
+- **生产环境**: VPS (104.194.86.117), 2G RAM, Debian, 原生 Docker，无需代理
+- **本地开发**: macOS, 中国大陆网络需 HTTP 代理 `127.0.0.1:7890`，Docker via Colima
 - **API 代理**: base_url=`https://proxy.moedb.moe`, model=`aws-claude-opus-4-6`
 - **镜像源**: Dockerfile 用 USTC debian mirror + npmmirror（不在构建时配代理）
 
 ## 部署操作规范
-- **Docker volume 是持久数据**：重建容器时必须复用同名 named volume（`codeclaw-andy-home`），绝不能删除或更换 volume name。Volume 中存储 session 文件、配置、聊天记录等不可恢复的数据。
-- **部署前确认 volume**：`docker volume ls | grep andy` 确认 volume 存在，`docker run` 时使用 `-v codeclaw-andy-home:/home/codeclaw`。
-- **端口映射**：容器必须 `-p 7001:7001`，否则 Kernel (host) 无法回调容器内的 Telegram Skill。
-- **API Key**：通过 `-e ANTHROPIC_API_KEY=...` 传入，不存储在文件中。
-- **禁用实验性 beta**：容器启动必须设 `-e CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`，避免 SDK 启用不稳定功能。
+- **部署脚本**: `scripts/deploy.sh [--build] [AGENT_ID]`，自动检测 Colima/原生 Docker
+- **Docker volume 是持久数据**：重建容器时必须复用同名 named volume（`codeclaw-{agentId}-home`），绝不能删除或更换 volume name。Volume 中存储 session 文件、配置、聊天记录等不可恢复的数据。
+- **端口映射**：anon=7001, sakiko=7002（通过 `DEPLOY_PORT` 指定）
+- **API Key**：通过 `~/.claude/config/agent-{agentId}.env` 传入（`--env-file`）
+- **禁用实验性 beta**：容器启动必须设 `-e CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`
+- **Linux 必须** `--add-host=host.docker.internal:host-gateway`
+- **HTTP_PROXY**: 仅在环境变量存在时传入容器（本地开发需要，服务器不需要）
+- **服务器更新流程**: `ssh server → cd ~/codeclaw → git pull → sudo docker build → deploy.sh`
+- **VPS 资源紧张 (2G RAM)**：避免在服务器上做重计算，优先利用 Docker 层缓存
+
+## 多 Agent 架构
+- 当前 agent: `anon` (port 7001), `sakiko` (port 7002)
+- Kernel 通过 `agentId` 路由消息，每个 agent 独立容器 + volume
+- 跨 agent 通信: core MCP server 提供 `list_agents` + `send_to_agent` 工具
+- Telegram @mention 转发: Skill 注册 `metadata.botUsername`，outbound 消息自动检测 @bot 并广播
 
 ## 开发约定
 - pnpm workspace monorepo, TypeScript ESM
