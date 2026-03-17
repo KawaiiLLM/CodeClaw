@@ -268,6 +268,12 @@ class ChatActionCircuitBreaker {
 
 // --- Main ---
 
+const EXT_MIME_MAP: Record<string, string> = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+  webp: "image/webp", gif: "image/gif", ogg: "audio/ogg",
+  mp3: "audio/mpeg", webm: "video/webm",
+};
+
 async function main() {
   const config = loadConfig();
   const bot = new Bot(config.bot_token);
@@ -850,8 +856,13 @@ async function main() {
         };
 
         const flushTextEntry = (merged: BufferedTextEntry) => {
-          // Write merged text as a single JSONL record
-          const mergedSeq = appendToLog(merged.chatId, { ...logBase, type: "text", text: merged.text });
+          // Write merged text as a single JSONL record (build logBase from merged, not outer closure)
+          const mergedLogBase = {
+            ts: merged.timestamp,
+            tgMsgId: merged.tgMsgId,
+            sender: { id: merged.sender.id, name: merged.sender.name },
+          };
+          const mergedSeq = appendToLog(merged.chatId, { ...mergedLogBase, type: "text", text: merged.text });
           const hOpts = { reply: merged.replyContent, mentioned: merged.mentioned };
           const header = buildNotificationHeader(merged.chatId, merged.sender.name, mergedSeq, merged.tgMsgId, hOpts);
           let content: { type: "text"; text: string } | { type: "image"; data: string; mimeType: string; caption: string };
@@ -1389,12 +1400,7 @@ async function main() {
             if (existsSync(absPath)) {
               const buf = readFileSync(absPath);
               const ext = absPath.split(".").pop()?.toLowerCase() ?? "";
-              const mimeMap: Record<string, string> = {
-                jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
-                webp: "image/webp", gif: "image/gif", ogg: "audio/ogg",
-                mp3: "audio/mpeg", webm: "video/webm",
-              };
-              attachmentsList.push({ mimeType: mimeMap[ext] ?? "application/octet-stream", data: buf.toString("base64") });
+              attachmentsList.push({ mimeType: EXT_MIME_MAP[ext] ?? "application/octet-stream", data: buf.toString("base64") });
             }
           }
           sendJson(res, 200, { success: true, message: record, attachments: attachmentsList });
@@ -1413,18 +1419,13 @@ async function main() {
 
         // Optionally include attachments for each record
         if (wantAttachments) {
-          const mimeMap: Record<string, string> = {
-            jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
-            webp: "image/webp", gif: "image/gif", ogg: "audio/ogg",
-            mp3: "audio/mpeg", webm: "video/webm",
-          };
           for (const rec of records) {
             if (rec.path && typeof rec.path === "string" && !rec.path.includes("..")) {
               const absPath = join(DATA_BASE, date, rec.path);
               if (existsSync(absPath)) {
                 const buf = readFileSync(absPath);
                 const ext = absPath.split(".").pop()?.toLowerCase() ?? "";
-                rec._attachment = { mimeType: mimeMap[ext] ?? "application/octet-stream", data: buf.toString("base64") };
+                rec._attachment = { mimeType: EXT_MIME_MAP[ext] ?? "application/octet-stream", data: buf.toString("base64") };
               }
             }
           }

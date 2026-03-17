@@ -1,7 +1,8 @@
 import type { InboundMessage } from "@codeclaw/types";
 import { logger } from "./logger.js";
 
-const DIARY_HOUR = parseInt(process.env.DIARY_HOUR ?? "4", 10);
+const rawHour = parseInt(process.env.DIARY_HOUR ?? "4", 10);
+const DIARY_HOUR = Number.isNaN(rawHour) || rawHour < 0 || rawHour > 23 ? 4 : rawHour;
 const DIARY_TZ = process.env.DIARY_TIMEZONE ?? "Asia/Shanghai";
 
 /** Get yesterday's date string (YYYY-MM-DD) in the configured timezone. */
