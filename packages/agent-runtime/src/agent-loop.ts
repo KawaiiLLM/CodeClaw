@@ -242,6 +242,7 @@ async function runSdkLoop(
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>,
   healthState: { status: "alive" | "busy" | "idle"; conversation?: string; sessionId?: string },
   autoReturnAction?: SessionAction,
+  persist: boolean = true,
 ): Promise<SessionAction> {
   const model = process.env.CLAUDE_MODEL ?? "aws-claude-opus-4-6";
   const baseURL = process.env.ANTHROPIC_BASE_URL;
@@ -289,7 +290,7 @@ async function runSdkLoop(
       mcpServers,
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
-      persistSession: true,
+      persistSession: persist,
       includePartialMessages: true,
       stderr: (data: string) => {
         logger.warn({ stderr: data.trimEnd() }, "SDK: subprocess stderr");
@@ -886,7 +887,7 @@ export async function startAgentLoop(opts: {
           const returnAction: SessionAction = resumeId
             ? { type: "resume", sessionId: resumeId }
             : { type: "continue" };
-          nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, { type: "new" }, mcpServers, healthState, returnAction);
+          nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, { type: "new" }, mcpServers, healthState, returnAction, false);
           continue;
         }
 
