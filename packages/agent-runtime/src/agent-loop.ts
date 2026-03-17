@@ -469,12 +469,17 @@ async function runSdkLoop(
     return false;
   }
 
-  // Wait for the first non-command message before starting the SDK query
+  // Wait for the first non-command message before starting the SDK query.
+  // If a /diary trigger arrives before any real message, return immediately
+  // so the outer loop can handle the diary session (SDK query hasn't started yet).
   let firstMsg: InboundMessage;
   while (true) {
     firstMsg = await injector.waitForMessage();
     lastMessage = firstMsg;
-    if (await handleRuntimeCommand(firstMsg)) continue;
+    if (await handleRuntimeCommand(firstMsg)) {
+      if (pendingAction) return pendingAction;
+      continue;
+    }
     break;
   }
   const firstFormatted = await formatMessageForAgent(firstMsg);
