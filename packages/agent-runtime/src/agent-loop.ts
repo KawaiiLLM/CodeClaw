@@ -506,6 +506,14 @@ async function runSdkLoop(
           injector.push(msg);
           break;
         }
+        // In single-turn system sessions (diary), re-queue user messages
+        // so they're processed by the next session after auto-return
+        if (autoReturnAction && msg.channel !== "__system__") {
+          logger.info({ channel: msg.channel, conversation: msg.conversation.id }, "SDK: re-queuing user message during system session");
+          injector.push(msg);
+          continue;
+        }
+
         lastMessage = msg;
 
         // Check for runtime commands
