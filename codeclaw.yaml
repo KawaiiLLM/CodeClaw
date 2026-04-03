@@ -2,9 +2,17 @@ kernel:
   port: 19000
   log_level: info
 
-agent:
-  id: andy
-  image: codeclaw/agent-runtime:dev
-  workspace_volume: agent-andy-workspace
-  api_key_env: ANTHROPIC_API_KEY
-  default_model: opus
+agents:
+  - id: anon
+    image: codeclaw/agent-runtime:dev
+    volume: codeclaw-anon-home
+    port: 7001
+    model: aws-claude-opus-4-6
+    env_file: ~/.claude/config/agent-anon.env
+
+  - id: sakiko
+    image: codeclaw/agent-runtime:dev
+    volume: codeclaw-sakiko-home
+    port: 7002
+    model: aws-claude-opus-4-6
+    env_file: ~/.claude/config/agent-sakiko.env

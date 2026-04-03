@@ -71,6 +71,7 @@ export function loadConfig(configPath?: string): KernelConfig {
           image: (agent?.image as string) ?? "codeclaw/agent-runtime:dev",
           volume: (agent?.workspace_volume as string) ?? "codeclaw-agent-0-home",
           port: 7001,
+          model: (agent?.model ?? agent?.default_model) as string | undefined,
         },
       ];
     }
