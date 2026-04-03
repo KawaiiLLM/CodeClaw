@@ -814,12 +814,15 @@ async function runStubLoop(
   kernelClient: KernelClient,
   agentId: string,
 ): Promise<void> {
-  logger.info("Running stub agent loop (no API key)");
+  const silent = process.env.SILENT_MODE === "1";
+  logger.info({ silent }, "Running stub agent loop (no API key)");
 
   while (true) {
     const msg = await injector.waitForMessage();
     const formatted = await formatMessageForAgent(msg);
     logger.info({ formatted: typeof formatted === "string" ? formatted : "[multimodal]" }, "Stub agent received message");
+
+    if (silent) continue;
 
     if (msg.content.type === "text") {
       try {

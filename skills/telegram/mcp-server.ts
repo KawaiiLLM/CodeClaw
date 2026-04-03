@@ -409,6 +409,7 @@ Typical flow:
 
 const TYPING_POLL_MS = 5000;
 const AGENT_ID = process.env.AGENT_ID ?? "agent-0";
+const SILENT_MODE = process.env.SILENT_MODE === "1";
 
 function sendTyping(conversation: string): void {
   if (!SKILL_ENDPOINT) return;
@@ -420,6 +421,7 @@ function sendTyping(conversation: string): void {
 }
 
 setInterval(async () => {
+  if (SILENT_MODE) return;
   try {
     const res = await fetch(`${KERNEL_URL}/api/agent/health`);
     if (!res.ok) return;
