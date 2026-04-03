@@ -67,6 +67,10 @@ async function formatMessageForAgent(msg: InboundMessage): Promise<MessageParam[
 type AgentMode = "sdk" | "chat" | "stub";
 
 function detectMode(): AgentMode {
+  if (process.env.SILENT_MODE === "1") {
+    logger.info({ mode: "stub" }, "Agent mode detected (SILENT_MODE override)");
+    return "stub";
+  }
   const hasKey = !!process.env.ANTHROPIC_API_KEY;
   let mode: AgentMode;
   if (sdkAvailable && hasKey) {
