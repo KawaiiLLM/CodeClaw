@@ -30,6 +30,7 @@ done
 AGENT_ID="${AGENT_ID:-anon}"
 CONTAINER_NAME="codeclaw-agent-${AGENT_ID}"
 VOLUME="${DEPLOY_VOLUME:-codeclaw-${AGENT_ID}-home}"
+MODEL="${DEPLOY_MODEL:-aws-claude-opus-4-6}"
 ENV_FILE="$HOME/.claude/config/agent-${AGENT_ID}.env"
 
 # --- 前置检查 ---
@@ -80,7 +81,7 @@ docker run -d \
   --env-file "$ENV_FILE" \
   -e KERNEL_URL=http://host.docker.internal:19000 \
   -e AGENT_ID="$AGENT_ID" \
-  -e CLAUDE_MODEL=aws-claude-opus-4-6 \
+  -e CLAUDE_MODEL="$MODEL" \
   -e CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
   -e SKILL_HOST_PORT="$PORT" \
   "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
