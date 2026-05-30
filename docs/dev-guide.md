@@ -12,7 +12,7 @@
 |------|----|------|
 | `DOCKER_HOST` | `unix:///Users/zhaoqixuan/.colima/default/docker.sock` | Colima socket 路径 |
 | `ANTHROPIC_API_KEY` | `sk-proxy-xxx` | API Key |
-| `ANTHROPIC_BASE_URL` | `https://proxy.moedb.moe` | API 代理 (大陆用) |
+| `ANTHROPIC_BASE_URL` | `https://link.moedb.moe` | API 代理 (大陆用) |
 | `CLAUDE_MODEL` | `aws-claude-opus-4-6` | 模型 ID |
 | `HTTP_PROXY` / `HTTPS_PROXY` | `http://host.docker.internal:7890` | 容器内代理 (外网访问) |
 | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` | `1` | Bedrock 代理不支持实验性参数, 必须设置 |
@@ -43,7 +43,7 @@ DOCKER_HOST=unix://~/.colima/default/docker.sock \
   -e KERNEL_URL=http://host.docker.internal:19000 \
   -e AGENT_ID=andy \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-  -e ANTHROPIC_BASE_URL="https://proxy.moedb.moe" \
+  -e ANTHROPIC_BASE_URL="https://link.moedb.moe" \
   -e CLAUDE_MODEL="aws-claude-opus-4-6" \
   -e HTTP_PROXY="http://host.docker.internal:7890" \
   -e HTTPS_PROXY="http://host.docker.internal:7890" \

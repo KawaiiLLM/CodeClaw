@@ -34,9 +34,9 @@ Unix 微内核式个人 AI Agent 系统：Kernel (host) + Agent (Docker) + Skill
 - 对于项目已经在用的、你有充分把握的库（如 TypeScript 标准库、pnpm 命令、基础 Node.js API），直接写，不需要每次都调研。**诚实的关键是区分"我确实知道"和"我觉得我知道"。**
 
 ## 环境约束
-- **生产环境**: VPS (104.194.86.117), 2G RAM, Debian, 原生 Docker，无需代理
+- **生产环境**: VPS (67.230.163.245), 2G RAM, Debian, 原生 Docker，无需代理
 - **本地开发**: macOS, 中国大陆网络需 HTTP 代理 `127.0.0.1:7890`，Docker via Colima
-- **API 代理**: base_url=`https://proxy.moedb.moe`, model=`aws-claude-opus-4-6`
+- **API 代理**: base_url=`https://link.moedb.moe`, model=`aws-claude-opus-4-6`
 - **镜像源**: Dockerfile 用 USTC debian mirror + npmmirror（不在构建时配代理）
 
 ## 部署操作规范

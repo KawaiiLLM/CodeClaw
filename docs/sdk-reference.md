@@ -691,7 +691,7 @@ SDK 通过 `options.env` 传递环境变量，不支持自定义 `fetch`：
 options: {
   env: {
     ANTHROPIC_API_KEY: "sk-...",
-    ANTHROPIC_BASE_URL: "https://proxy.moedb.moe",
+    ANTHROPIC_BASE_URL: "https://link.moedb.moe",
     HTTPS_PROXY: "http://host.docker.internal:7890",
     CLAUDE_MODEL: "aws-claude-opus-4-6",
   }
