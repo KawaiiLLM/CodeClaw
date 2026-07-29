@@ -8,7 +8,7 @@ set -euo pipefail
 #   ./scripts/deploy.sh sakiko              # 部署 sakiko（不构建）
 #
 # 环境变量（可选）:
-#   CLAUDE_MODEL          模型 ID（默认 aws-claude-opus-4-6）
+#   DEPLOY_MODEL          模型 ID（默认继承 CLAUDE_MODEL，否则 aws-claude-opus-4-6）
 #   SILENT_MODE=1         静默模式：只记录聊天，不调 LLM/不回复
 #   DEPLOY_CPUS=1         CPU 核数上限（防失控）
 #   DEPLOY_MEMORY=1g      内存上限（超限触发 cgroup OOM，保护宿主）
@@ -43,7 +43,7 @@ done
 AGENT_ID="${AGENT_ID:-anon}"
 CONTAINER_NAME="codeclaw-agent-${AGENT_ID}"
 VOLUME="${DEPLOY_VOLUME:-codeclaw-${AGENT_ID}-home}"
-MODEL="${DEPLOY_MODEL:-aws-claude-opus-4-6}"
+MODEL="${DEPLOY_MODEL:-${CLAUDE_MODEL:-aws-claude-opus-4-6}}"
 ENV_FILE="$HOME/.claude/config/agent-${AGENT_ID}.env"
 
 # --- 前置检查 ---
