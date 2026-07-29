@@ -26,7 +26,7 @@ COPY skills/ skills/
 COPY workspace-template/CLAUDE.md /codeclaw/workspace-template/CLAUDE.md
 
 # Install pnpm and dependencies (includes skills)
-RUN npm install -g pnpm && pnpm config set registry https://registry.npmmirror.com && pnpm install --no-frozen-lockfile
+RUN npm install -g pnpm@10.31.0 && pnpm config set registry https://registry.npmmirror.com && pnpm install --frozen-lockfile
 
 # Create non-root user with explicit UID (Claude Code SDK refuses bypassPermissions as root)
 RUN userdel -r node && \

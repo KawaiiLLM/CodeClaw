@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.31.0",
   "description": "A Unix microkernel-style personal AI Agent system powered by Claude Agent SDK",
   "scripts": {
     "dev:kernel": "tsx packages/kernel/src/index.ts",
