@@ -249,7 +249,7 @@ async function runSdkLoop(
   persist: boolean = true,
   queryFactory: typeof sdkQuery = sdkQuery,
 ): Promise<SessionAction> {
-  let model = process.env.CLAUDE_MODEL ?? "aws-claude-opus-4-6";
+  let model = process.env.CLAUDE_MODEL ?? "claude-sonnet-4-6";
   const baseURL = process.env.ANTHROPIC_BASE_URL;
   const apiKey = process.env.ANTHROPIC_API_KEY!;
   const httpProxy = resolveProxy();
@@ -722,7 +722,7 @@ async function runChatLoop(
 ): Promise<void> {
   const apiKey = process.env.ANTHROPIC_API_KEY!;
   const baseURL = process.env.ANTHROPIC_BASE_URL;
-  const model = process.env.CLAUDE_MODEL ?? "aws-claude-opus-4-6";
+  const model = process.env.CLAUDE_MODEL ?? "claude-sonnet-4-6";
   const httpProxy = resolveProxy();
 
   // Build a proxied fetch if HTTP proxy is set (for containers behind a firewall)

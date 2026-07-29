@@ -41,7 +41,10 @@ async function main() {
         port: agent.port,
         kernelUrl: `http://host.docker.internal:${config.kernel.port}`,
         envFile: agent.envFile,
-        extraEnv: agent.extraEnv,
+        extraEnv: {
+          ...agent.extraEnv,
+          ...(agent.model ? { CLAUDE_MODEL: agent.model } : {}),
+        },
       });
       await containerManager.startAgent(agent.id);
       supervisor.startMonitoring(agent.id);

@@ -8,6 +8,7 @@ export interface AgentConfig {
   image: string;
   volume: string;
   port: number; // Skill service port mapping (host:container)
+  model?: string; // LLM model ID, e.g. "aws-claude-opus-4-6"
   envFile?: string; // Path to env file with API key etc.
   extraEnv?: Record<string, string>;
 }
@@ -57,6 +58,7 @@ export function loadConfig(configPath?: string): KernelConfig {
         image: (a.image as string) ?? "codeclaw/agent-runtime:dev",
         volume: (a.volume as string) ?? `codeclaw-${a.id ?? "agent-0"}-home`,
         port: (a.port as number) ?? 7001,
+        model: a.model as string | undefined,
         envFile: a.env_file as string | undefined,
         extraEnv: a.extra_env as Record<string, string> | undefined,
       }));
@@ -69,6 +71,7 @@ export function loadConfig(configPath?: string): KernelConfig {
           image: (agent?.image as string) ?? "codeclaw/agent-runtime:dev",
           volume: (agent?.workspace_volume as string) ?? "codeclaw-agent-0-home",
           port: 7001,
+          model: (agent?.model ?? agent?.default_model) as string | undefined,
         },
       ];
     }
