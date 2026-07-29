@@ -247,8 +247,9 @@ async function runSdkLoop(
   healthState: { status: "alive" | "busy" | "idle"; conversation?: string; sessionId?: string },
   autoReturnAction?: SessionAction,
   persist: boolean = true,
+  queryFactory: typeof sdkQuery = sdkQuery,
 ): Promise<SessionAction> {
-  const model = process.env.CLAUDE_MODEL ?? "aws-claude-opus-4-6";
+  let model = process.env.CLAUDE_MODEL ?? "aws-claude-opus-4-6";
   const baseURL = process.env.ANTHROPIC_BASE_URL;
   const apiKey = process.env.ANTHROPIC_API_KEY!;
   const httpProxy = resolveProxy();
@@ -257,6 +258,7 @@ async function runSdkLoop(
 
   // Session switch: set by handleRuntimeCommand, checked after interrupt causes result
   let pendingAction: SessionAction | null = null;
+  let q: ReturnType<typeof sdkQuery> | undefined;
 
   // Track last message for fallback reply routing
   let lastMessage: InboundMessage | null = null;
@@ -279,32 +281,6 @@ async function runSdkLoop(
     } : {}),
   };
 
-  const q = sdkQuery({
-    prompt: stream,
-    options: {
-      systemPrompt: {
-        type: "preset",
-        preset: "claude_code",
-        append: SDK_SYSTEM_APPEND,
-      },
-      settingSources: ["user", "project"],
-      model,
-      cwd: process.env.HOME ?? workspacePath,
-      env,
-      mcpServers,
-      permissionMode: "bypassPermissions",
-      allowDangerouslySkipPermissions: true,
-      persistSession: persist,
-      includePartialMessages: true,
-      stderr: (data: string) => {
-        logger.warn({ stderr: data.trimEnd() }, "SDK: subprocess stderr");
-      },
-      ...(sessionConfig.type === "continue" ? { continue: true } : {}),
-      ...(sessionConfig.type === "resume" ? { resume: sessionConfig.sessionId } : {}),
-      // "new" and "exit" don't need special options (fresh session)
-    },
-  });
-
   /** Handle a slash command at the Runtime level. Returns true if handled (don't push to stream). */
   async function handleRuntimeCommand(msg: InboundMessage): Promise<boolean> {
     const meta = (msg as any).metadata as { command?: string; args?: string; raw?: string } | undefined;
@@ -323,7 +299,11 @@ async function runSdkLoop(
         return true;
       }
       try {
-        await q.setModel(args);
+        if (q) {
+          await q.setModel(args);
+        } else {
+          model = args;
+        }
         logger.info({ newModel: args }, "SDK: model changed via /model command");
         await kernelClient.sendMessage({
           channel: msg.channel, conversation: msg.conversation.id,
@@ -342,7 +322,7 @@ async function runSdkLoop(
 
     if (cmd === "/interrupt") {
       try {
-        await q.interrupt();
+        await q?.interrupt();
         logger.info("SDK: interrupted via /interrupt command");
         await kernelClient.sendMessage({
           channel: msg.channel, conversation: msg.conversation.id,
@@ -408,7 +388,7 @@ async function runSdkLoop(
           content: { type: "text", text: "Starting new session..." },
           replyTo: msg.id,
         }).catch(() => {});
-        try { await q.interrupt(); } catch { /* best effort */ }
+        try { await q?.interrupt(); } catch { /* best effort */ }
         return true;
       }
 
@@ -442,7 +422,7 @@ async function runSdkLoop(
             content: { type: "text", text: `Resuming session: ${title}...` },
             replyTo: msg.id,
           }).catch(() => {});
-          try { await q.interrupt(); } catch { /* best effort */ }
+          try { await q?.interrupt(); } catch { /* best effort */ }
         } catch (err) {
           await kernelClient.sendMessage({
             channel: msg.channel, conversation: msg.conversation.id,
@@ -466,7 +446,7 @@ async function runSdkLoop(
       const diaryDate = args.trim() || undefined; // optional YYYY-MM-DD
       logger.info({ sessionId, diaryDate }, "Runtime: diary trigger received, switching to diary session");
       pendingAction = { type: "diary", resumeSessionId: sessionId, date: diaryDate };
-      try { await q.interrupt(); } catch { /* best effort */ }
+      try { await q?.interrupt(); } catch { /* best effort */ }
       return true;
     }
 
@@ -490,94 +470,120 @@ async function runSdkLoop(
   const firstFormatted = await formatMessageForAgent(firstMsg);
   logger.info({ formatted: firstFormatted }, "SDK: received first message");
 
-  healthState.status = "busy";
-  healthState.conversation = `${firstMsg.channel}/${firstMsg.conversation.id}`;
-  await kernelClient.reportHealth(agentId, "busy", {
-    conversation: healthState.conversation,
-  }).catch(() => {});
-
-  // Seed stream with first message
-  stream.push(firstFormatted, sessionId, { channel: firstMsg.channel, conversation: firstMsg.conversation.id });
-
-  // Background coroutine: continuously read from injector and push to stream
+  q = queryFactory({
+    prompt: stream,
+    options: {
+      systemPrompt: {
+        type: "preset",
+        preset: "claude_code",
+        append: SDK_SYSTEM_APPEND,
+      },
+      settingSources: ["user", "project"],
+      model,
+      cwd: process.env.HOME ?? workspacePath,
+      env,
+      mcpServers,
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      persistSession: persist,
+      includePartialMessages: true,
+      stderr: (data: string) => {
+        logger.warn({ stderr: data.trimEnd() }, "SDK: subprocess stderr");
+      },
+      ...(sessionConfig.type === "continue" ? { continue: true } : {}),
+      ...(sessionConfig.type === "resume" ? { resume: sessionConfig.sessionId } : {}),
+    },
+  });
+  const activeQuery = q;
   let pumpStopped = false;
-  const pumpMessages = async () => {
-    while (!pumpStopped) {
-      try {
-        const msg = await injector.waitForMessage();
-        if (pumpStopped) {
-          // Session switched while we were waiting — re-queue so next loop picks it up
-          injector.push(msg);
-          break;
-        }
-        // In single-turn system sessions (diary), re-queue user messages
-        // so they're processed by the next session after auto-return
-        if (autoReturnAction && msg.channel !== "__system__") {
-          logger.info({ channel: msg.channel, conversation: msg.conversation.id }, "SDK: re-queuing user message during system session");
-          injector.push(msg);
-          continue;
-        }
 
-        lastMessage = msg;
+  try {
+    healthState.status = "busy";
+    healthState.conversation = `${firstMsg.channel}/${firstMsg.conversation.id}`;
+    await kernelClient.reportHealth(agentId, "busy", {
+      conversation: healthState.conversation,
+    }).catch(() => {});
 
-        // Check for runtime commands
-        if (await handleRuntimeCommand(msg)) {
-          // If a session switch was requested while idle, end the stream to
-          // break the for-await loop (q.interrupt() is no-op without active turn)
-          if (pendingAction && healthState.status === "idle") {
-            stream.end();
+    // Seed stream with first message
+    stream.push(firstFormatted, sessionId, { channel: firstMsg.channel, conversation: firstMsg.conversation.id });
+
+    // Background coroutine: continuously read from injector and push to stream
+    const pumpMessages = async () => {
+      while (!pumpStopped) {
+        try {
+          const msg = await injector.waitForMessage();
+          if (pumpStopped) {
+            // Session switched while we were waiting — re-queue so next loop picks it up
+            injector.push(msg);
             break;
           }
-          continue;
-        }
-
-        // Check for SDK commands — push raw command text, not notification header
-        const meta = (msg as any).metadata as { command?: string; raw?: string } | undefined;
-        if (meta?.command) {
-          // SDK command: push just the command text (e.g. "/compact")
-          logger.info({ command: meta.raw }, "SDK: forwarding command to SDK");
-
-          // Send user feedback for SDK-internal commands that don't produce agent output
-          if (meta.command === "/compact") {
-            await kernelClient.sendMessage({
-              channel: msg.channel, conversation: msg.conversation.id,
-              content: { type: "text", text: "Compacting conversation context..." },
-              replyTo: msg.id,
-            }).catch(() => {});
+          // In single-turn system sessions (diary), re-queue user messages
+          // so they're processed by the next session after auto-return
+          if (autoReturnAction && msg.channel !== "__system__") {
+            logger.info({ channel: msg.channel, conversation: msg.conversation.id }, "SDK: re-queuing user message during system session");
+            injector.push(msg);
+            break;
           }
 
-          stream.push(meta.raw ?? meta.command, sessionId, { channel: msg.channel, conversation: msg.conversation.id });
+          lastMessage = msg;
+
+          // Check for runtime commands
+          if (await handleRuntimeCommand(msg)) {
+            // If a session switch was requested while idle, end the stream to
+            // break the for-await loop (q.interrupt() is no-op without active turn)
+            if (pendingAction && healthState.status === "idle") {
+              stream.end();
+              break;
+            }
+            continue;
+          }
+
+          // Check for SDK commands — push raw command text, not notification header
+          const meta = (msg as any).metadata as { command?: string; raw?: string } | undefined;
+          if (meta?.command) {
+            // SDK command: push just the command text (e.g. "/compact")
+            logger.info({ command: meta.raw }, "SDK: forwarding command to SDK");
+
+            // Send user feedback for SDK-internal commands that don't produce agent output
+            if (meta.command === "/compact") {
+              await kernelClient.sendMessage({
+                channel: msg.channel, conversation: msg.conversation.id,
+                content: { type: "text", text: "Compacting conversation context..." },
+                replyTo: msg.id,
+              }).catch(() => {});
+            }
+
+            stream.push(meta.raw ?? meta.command, sessionId, { channel: msg.channel, conversation: msg.conversation.id });
+            healthState.status = "busy";
+            healthState.conversation = `${msg.channel}/${msg.conversation.id}`;
+            await kernelClient.reportHealth(agentId, "busy", {
+              conversation: healthState.conversation,
+            }).catch(() => {});
+            continue;
+          }
+
+          // Normal message
+          const formatted = await formatMessageForAgent(msg);
+          logger.info({ formatted: typeof formatted === "string" ? formatted : "[multimodal]" }, "SDK: injecting message");
+          stream.push(formatted, sessionId, { channel: msg.channel, conversation: msg.conversation.id });
           healthState.status = "busy";
           healthState.conversation = `${msg.channel}/${msg.conversation.id}`;
           await kernelClient.reportHealth(agentId, "busy", {
             conversation: healthState.conversation,
           }).catch(() => {});
-          continue;
+        } catch (err) {
+          logger.error({ err }, "SDK: message pump error");
+          throw err;
         }
-
-        // Normal message
-        const formatted = await formatMessageForAgent(msg);
-        logger.info({ formatted: typeof formatted === "string" ? formatted : "[multimodal]" }, "SDK: injecting message");
-        stream.push(formatted, sessionId, { channel: msg.channel, conversation: msg.conversation.id });
-        healthState.status = "busy";
-        healthState.conversation = `${msg.channel}/${msg.conversation.id}`;
-        await kernelClient.reportHealth(agentId, "busy", {
-          conversation: healthState.conversation,
-        }).catch(() => {});
-      } catch (err) {
-        logger.error({ err }, "SDK: message pump error");
-        break;
       }
-    }
-  };
-  const pumpPromise = pumpMessages();
-  pumpPromise.catch((err) => {
-    logger.error({ err }, "SDK: message pump crashed");
-    stream.end();
-  });
+    };
+    let pumpFailure: unknown;
+    void pumpMessages().catch((err) => {
+      pumpFailure = err;
+      stream.end();
+    });
 
-  try {
-    for await (const msg of q) {
+    for await (const msg of activeQuery) {
       if (msg.type === "system") {
         if (msg.subtype === "init") {
           sessionId = msg.session_id;
@@ -655,6 +661,7 @@ async function runSdkLoop(
       }
     }
 
+    if (pumpFailure) throw pumpFailure;
     logger.info("SDK: query stream ended");
   } catch (err) {
     logger.error({ err }, "SDK: query failed");
@@ -668,10 +675,16 @@ async function runSdkLoop(
         replyTo: lastMessage.id,
       }).catch(() => {});
     }
+    throw err;
   } finally {
     pumpStopped = true;
     stream.end();
-    try { q.close(); } catch { /* best effort */ }
+    try {
+      activeQuery.close();
+    } catch (err) {
+      logger.error({ err }, "SDK: query close failed");
+      throw err;
+    }
   }
 
   // Return the next action
@@ -862,8 +875,10 @@ export async function startAgentLoop(opts: {
   agentId: string;
   workspacePath: string;
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
+  queryFactory?: typeof sdkQuery;
 }): Promise<void> {
   const { injector, kernelClient, agentId, workspacePath, mcpServers } = opts;
+  const queryFactory = opts.queryFactory ?? sdkQuery;
 
   // Shared health state — updated by SDK loop, re-sent by heartbeat
   const healthState: { status: "alive" | "busy" | "idle"; conversation?: string; sessionId?: string } = {
@@ -910,12 +925,12 @@ export async function startAgentLoop(opts: {
           const returnAction: SessionAction = resumeId
             ? { type: "resume", sessionId: resumeId }
             : { type: "continue" };
-          nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, { type: "new" }, mcpServers, healthState, returnAction, false);
+          nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, { type: "new" }, mcpServers, healthState, returnAction, false, queryFactory);
           continue;
         }
 
         logger.info({ action: nextAction }, "SDK: starting session");
-        nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, nextAction, mcpServers, healthState);
+        nextAction = await runSdkLoop(injector, kernelClient, agentId, workspacePath, nextAction, mcpServers, healthState, undefined, true, queryFactory);
         if (nextAction.type !== "exit") {
           logger.info({ nextAction }, "SDK: restarting with new session config");
         }
